@@ -66,15 +66,18 @@ client.on('messageCreate', async (message) => {
 
 // API endpoint to get all user states (for polling fallback)
 app.get('/states', (req, res) => {
+    console.log('GET /states received');
     const states = {};
     userStates.forEach((value, key) => {
         states[key] = value.data;
     });
+    console.log('Returning states:', Object.keys(states));
     res.json(states);
 });
 
 // API endpoint to get specific user state
 app.get('/state/:username', (req, res) => {
+    console.log(`GET /state/${req.params.username} received`);
     const state = userStates.get(req.params.username);
     if (state) {
         res.json(state.data);
@@ -85,10 +88,14 @@ app.get('/state/:username', (req, res) => {
 
 // API endpoint to update user state (from game clients)
 app.post('/state/:username', (req, res) => {
+    console.log(`POST /state/${req.params.username} received`);
+    console.log('Body:', req.body);
+    
     const username = req.params.username;
     const data = req.body;
     
     if (!data || !data.username) {
+        console.log('Invalid data - missing username');
         return res.status(400).json({ error: 'Invalid data' });
     }
     
@@ -100,6 +107,8 @@ app.post('/state/:username', (req, res) => {
         data: data
     });
     
+    console.log(`State stored for ${username}`);
+    
     // If we have a Discord channel, also update there
     if (CHANNEL_ID && client.readyAt) {
         const channel = client.channels.cache.get(CHANNEL_ID);
@@ -109,6 +118,7 @@ app.post('/state/:username', (req, res) => {
                 existingState.message.edit(JSON.stringify(data))
                     .then(msg => {
                         userStates.set(username, { message: msg, data: data });
+                        console.log(`Discord message edited for ${username}`);
                     })
                     .catch(err => console.error('Error editing message:', err));
             } else {
@@ -116,6 +126,7 @@ app.post('/state/:username', (req, res) => {
                 channel.send(JSON.stringify(data))
                     .then(msg => {
                         userStates.set(username, { message: msg, data: data });
+                        console.log(`Discord message sent for ${username}`);
                     })
                     .catch(err => console.error('Error sending message:', err));
             }
