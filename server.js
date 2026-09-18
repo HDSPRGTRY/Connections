@@ -85,10 +85,14 @@ app.get('/state/:username', (req, res) => {
 
 // API endpoint to update user state (from game clients)
 app.post('/state/:username', (req, res) => {
+    console.log(`POST /state/${req.params.username} received`);
+    console.log('Body:', req.body);
+    
     const username = req.params.username;
     const data = req.body;
     
     if (!data || !data.username) {
+        console.log('Invalid data - missing username');
         return res.status(400).json({ error: 'Invalid data' });
     }
     
@@ -98,6 +102,7 @@ app.post('/state/:username', (req, res) => {
         data: data
     });
     
+    console.log(`State stored for ${username}`);
     res.json({ success: true });
 });
 
