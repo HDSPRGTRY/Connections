@@ -3,6 +3,7 @@ const express = require('express');
 
 // Express server for Render health checks
 const app = express();
+app.use(express.json()); // Parse JSON request bodies
 app.get('/', (req, res) => res.send('Discord Bot Running'));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
