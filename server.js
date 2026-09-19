@@ -8,6 +8,11 @@ app.get('/', (req, res) => res.send('Discord Bot Running'));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
+// Keep-alive: ping server every 25 seconds to prevent cold starts
+setInterval(() => {
+    fetch(`http://localhost:${PORT}`).catch(err => console.error('Keep-alive ping failed:', err));
+}, 25000);
+
 // Discord Bot Setup
 const client = new Client({
     intents: [
