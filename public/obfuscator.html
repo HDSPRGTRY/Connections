@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GNG Obfuscator</title>
+<style>
+  body { background:#0d1117; color:#c9d1d9; font-family:Consolas,Menlo,monospace; margin:0; padding:12px; }
+  h1 { font-size:18px; margin:4px 0 10px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0; }
+  textarea { width:100%; box-sizing:border-box; background:#010409; color:#c9d1d9;
+    border:1px solid #30363d; border-radius:6px; font-family:inherit; font-size:12px; }
+  #src { height:26vh; } #dst { height:26vh; }
+  button, input[type=number] { background:#21262d; color:#c9d1d9; border:1px solid #30363d;
+    border-radius:6px; padding:8px 14px; font-family:inherit; font-size:14px; }
+  button:active { background:#30363d; }
+  #go { background:#238636; border-color:#238636; font-weight:bold; }
+  label { font-size:13px; }
+  #stats { font-size:12px; white-space:pre-wrap; color:#8b949e; margin-top:8px; }
+  #err { color:#ff7b72; font-size:13px; white-space:pre-wrap; }
+  .hint { font-size:12px; color:#8b949e; }
+</style>
+</head>
+<body>
+<h1>GNG Obfuscator <span class="hint">— Lua/Luau, runs fully in your browser</span></h1>
+<div class="row">
+  <input type="file" id="file" accept=".txt,.lua,.luau">
+  <label>Seed <input type="number" id="seed" value="7" style="width:90px"></label>
+  <label><input type="checkbox" id="optRename" checked> rename locals</label>
+  <label><input type="checkbox" id="optStrings" checked> encrypt strings</label>
+  <label><input type="checkbox" id="optNumbers" checked> mangle numbers</label>
+</div>
+<textarea id="src" placeholder="Paste Lua/Luau source here (or pick a file above)…"></textarea>
+<div class="row">
+  <button id="go">OBFUSCATE</button>
+  <button id="copy">Copy output</button>
+  <button id="dl">Download .txt</button>
+</div>
+<div id="err"></div>
+<textarea id="dst" readonly placeholder="Obfuscated output…"></textarea>
+<div id="stats"></div>
+<script src="/engine.js"></script>
+<script>
+document.getElementById('file').addEventListener('change', function (e) {
+  var f = e.target.files[0];
+  if (!f) return;
+  var r = new FileReader();
+  r.onload = function () { document.getElementById('src').value = r.result; };
+  r.readAsText(f);
+});
+document.getElementById('go').addEventListener('click', function () {
+  var errBox = document.getElementById('err');
+  errBox.textContent = '';
+  try {
+    var seed = parseInt(document.getElementById('seed').value, 10) || 0;
+    var srcVal = document.getElementById('src').value;
+    var res = gngObfuscate(srcVal, seed, {
+      rename: document.getElementById('optRename').checked,
+      strings: document.getElementById('optStrings').checked,
+      numbers: document.getElementById('optNumbers').checked
+    });
+    document.getElementById('dst').value = res.code;
+    var s = res.stats;
+    document.getElementById('stats').textContent =
+      'decls renamed: ' + s.decls + '  |  uses renamed: ' + s.renamed +
+      '  |  strings encrypted: ' + s.str_enc + ' (plaintext: ' + s.str_plain + ')' +
+      '  |  numbers mangled: ' + s.num_mangled +
+      '  |  bytes: ' + srcVal.length + ' -> ' + res.code.length;
+  } catch (e) {
+    errBox.textContent = 'FAILED: ' + (e && e.message ? e.message : e);
+  }
+});
+document.getElementById('copy').addEventListener('click', function () {
+  var t = document.getElementById('dst');
+  t.select();
+  try { document.execCommand('copy'); } catch (e) {}
+});
+document.getElementById('dl').addEventListener('click', function () {
+  var blob = new Blob([document.getElementById('dst').value], {type: 'text/plain'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'obfuscated.txt';
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+});
+</script>
+</body>
+</html>
