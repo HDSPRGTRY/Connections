@@ -5,7 +5,7 @@
  *
  * ENHANCED FEATURES:
  * - Dynamic key generation based on runtime values (time, environment properties)
- * - AES-like multi-round encryption with S-box substitution and diffusion (educational implementation)
+ * - Multi-round encryption with S-box substitution and bit rotation
  * - Sophisticated anti-debugging and tamper detection (timing analysis, debugger detection)
  * - Split decoding logic across multiple functions with indirect calls
  * - Comprehensive environment validation checks (stdlib verification)
@@ -293,54 +293,30 @@ function gngObfuscate(src, seed, opts) {
     var key2 = rnd(65536);
     var key3 = rnd(65536);
     var rounds = 4 + rnd(4); /* 4-7 rounds of encryption */
-    var hx = '', i, j, b, block, roundKey;
+    var hx = '', i, j, b;
 
-    /* Pad data to multiple of 16 bytes */
-    var padLen = (16 - (data.length % 16)) % 16;
-    for (i = 0; i < padLen; i++) data.push(padLen);
+    /* Encrypt each byte with multi-layer XOR and bit rotation */
+    for (i = 0; i < data.length; i++) {
+      b = data[i];
 
-    /* Encrypt in 16-byte blocks */
-    for (i = 0; i < data.length; i += 16) {
-      block = [];
-      for (j = 0; j < 16; j++) {
-        if (i + j < data.length) block[j] = data[i + j];
-        else block[j] = 0;
-      }
-
-      /* Apply multiple rounds of AES-like encryption */
+      /* Apply multiple rounds of encryption */
       for (var r = 0; r < rounds; r++) {
-        roundKey = (key1 + r * key2) ^ key3;
+        var roundKey = (key1 + r * key2) ^ key3;
 
-        /* SubBytes: S-box substitution */
-        for (j = 0; j < 16; j++) {
-          block[j] = SBOX[block[j] ^ (roundKey & 0xFF)];
-        }
+        /* XOR with dynamic key */
+        b = (b ^ (roundKey & 0xFF)) % 256;
 
-        /* ShiftRows: row rotation */
-        var temp = block[1]; block[1] = block[5]; block[5] = block[9]; block[9] = block[13]; block[13] = temp;
-        temp = block[2]; block[2] = block[10]; block[10] = temp;
-        temp = block[3]; block[3] = block[15]; block[15] = block[11]; block[11] = block[7]; block[7] = temp;
+        /* S-box substitution */
+        b = SBOX[b];
 
-        /* MixColumns: column mixing (simplified) */
-        for (j = 0; j < 4; j++) {
-          var idx = j * 4;
-          var a = block[idx], b = block[idx + 1], c = block[idx + 2], d = block[idx + 3];
-          block[idx] = (a ^ b ^ c ^ d) % 256;
-          block[idx + 1] = (a ^ b) % 256;
-          block[idx + 2] = (b ^ c) % 256;
-          block[idx + 3] = (c ^ d) % 256;
-        }
+        /* Bit rotation */
+        b = ((b << 3) | (b >>> 5)) % 256;
 
-        /* AddRoundKey: XOR with round key */
-        for (j = 0; j < 16; j++) {
-          block[j] = (block[j] ^ ((roundKey >> (j % 8)) & 0xFF)) % 256;
-        }
+        /* XOR with rotated key */
+        b = (b ^ ((roundKey >> 8) & 0xFF)) % 256;
       }
 
-      /* Output as hex */
-      for (j = 0; j < 16; j++) {
-        hx += (block[j] < 16 ? '0' : '') + block[j].toString(16);
-      }
+      hx += (b < 16 ? '0' : '') + b.toString(16);
     }
 
     return [hx, key1, key2, key3, rounds];
@@ -717,7 +693,7 @@ function gngObfuscate(src, seed, opts) {
     antiDebugCode = 'local ' + PREFIX + 'T=os.clock;local ' + PREFIX + 'C=debug.getinfo;';
     antiDebugCode += 'local ' + PREFIX + 'A=function()if ' + PREFIX + 'C(4)then return true end return false end;';
     antiDebugCode += 'local ' + PREFIX + 'B=function()local t1=' + PREFIX + 'T()local x=0 for i=1,1000 do x=x+i end local t2=' + PREFIX + 'T()if(t2-t1)>0.1 then return true end return false end;';
-    antiDebugCode += 'local ' + PREFIX + 'D=function()if ' + PREFIX + 'A()then return true end if ' + PREFIX + 'B()then return true end return false end;';
+    antiDebugCode += 'local ' + PREFIX + 'DB=function()if ' + PREFIX + 'A()then return true end if ' + PREFIX + 'B()then return true end return false end;';
     envCheckCode = 'if not _G or type(_G)~="table"then error()end;if type(os.clock)~="function"then error()end;';
     envCheckCode += 'if type(debug)~="table"then error()end;if type(debug.getinfo)~="function"then error()end;';
     envCheckCode += 'if type(os.time)~="function"then error()end;if type(collectgarbage)~="function"then error()end;';
@@ -736,30 +712,14 @@ function gngObfuscate(src, seed, opts) {
 
   var decFunc1 = PREFIX + 'D1';
   var decFunc2 = PREFIX + 'D2';
-  var decFunc3 = PREFIX + 'D3';
-  var decFunc4 = PREFIX + 'D4';
-  var decFunc5 = PREFIX + 'D5';
 
   /* Hex to bytes conversion */
   stub += 'local ' + decFunc1 + '=function(h)local r={}for i=1,#h,2 do r[#r+1]=tonumber(h:sub(i,i+1),16)end return r end;';
 
-  /* Inverse ShiftRows */
-  stub += 'local ' + decFunc2 + '=function(b)local t=b[1];b[1]=b[13];b[13]=b[9];b[9]=b[5];b[5]=t;t=b[2];b[2]=b[10];b[10]=t;t=b[3];b[3]=b[7];b[7]=b[11];b[11]=b[15];b[15]=t;return b end;';
+  /* Main decryption function - reverse of encryption */
+  stub += 'local ' + decFunc2 + '=function(h,k1,k2,k3,rounds)local s={' + invSBoxStr + '}local r=rounds or 4 local out=""for i=1,#h,2 do local b=tonumber(h:sub(i,i+1),16)for n=r-1,0,-1 do local rk=(k1+n*k2)~k3 b=(b~=((rk>>8)&0xFF))%256 b=((b>>>3)|(b<<5))%256 b=s[b+1] b=(b~=(rk&0xFF))%256 end out=out..string.char(b)end return out end;';
 
-  /* Inverse MixColumns */
-  stub += 'local ' + decFunc3 + '=function(b)for j=0,3 do local i=j*4 local a=b[i+1]local d=b[i+4]b[i+1]=(a~d)%256;b[i+2]=(a~b[i+2])%256;b[i+3]=(b[i+3]~d)%256 end return b end;';
-
-  /* Inverse SubBytes using inverse S-box */
-  stub += 'local ' + decFunc4 + '=function(b,k)local s={' + invSBoxStr + '}for i=1,16 do b[i]=s[(b[i]~=(k&0xFF))%256+1]end return b end;';
-
-  /* Main decryption function with indirect calls */
-  stub += 'local ' + decFunc5 + '=function(h,k1,k2,k3,rounds)local b=' + decFunc1 + '(h)local r=rounds or 4 for n=r-1,0,-1 do local rk=(k1+n*k2)~k3 for i=1,16 do b[i]=(b[i]~=((rk>>((i-1)%8))&0xFF))%256 end b=' + decFunc3 + '(b) b=' + decFunc2 + '(b) b=' + decFunc4 + '(b,rk)end local s=""for i=1,16 do s=s..string.char(b[i])end return s end;';
-
-  /* Function table for indirect calls */
-  stub += 'local ' + PREFIX + 'FT={' + decFunc1 + ',' + decFunc2 + ',' + decFunc3 + ',' + decFunc4 + ',' + decFunc5 + '};';
-  stub += 'local ' + PREFIX + 'FI={5,4,3,2,1};';
-
-  stub += 'local ' + DEC + '=function(h,k1,k2,k3,rounds)local idx=' + PREFIX + 'FI[1] local f=' + PREFIX + 'FT[idx] local a=f(h,k1,k2,k3,rounds)return a end;';
+  stub += 'local ' + DEC + '=function(h,k1,k2,k3,rounds)local a=' + decFunc2 + '(h,k1,k2,k3,rounds)return a end;';
 
   stub += antiDebugCode;
   stub += envCheckCode;
@@ -816,8 +776,8 @@ function gngObfuscate(src, seed, opts) {
 
   var deadCode = '';
   if (doAntiDebug) {
-    deadCode += 'if ' + PREFIX + 'D()then local ' + PREFIX + 'X=0 for i=1,1000 do ' + PREFIX + 'X=' + PREFIX + 'X+i end end;';
-    deadCode += 'local ' + PREFIX + 'CH=function()if ' + PREFIX + 'D()then error()end end;';
+    deadCode += 'if ' + PREFIX + 'DB()then local ' + PREFIX + 'X=0 for i=1,1000 do ' + PREFIX + 'X=' + PREFIX + 'X+i end end;';
+    deadCode += 'local ' + PREFIX + 'CH=function()if ' + PREFIX + 'DB()then error()end end;';
     deadCode += 'for i=1,5 do ' + PREFIX + 'CH()end;';
 
     /* Virtualized execution simulation */
