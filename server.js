@@ -1,10 +1,17 @@
 const { Client, GatewayIntentBits } = require('discord.js');
 const express = require('express');
+const path = require('path');
 
 // Express server for Render health checks
 const app = express();
 app.use(express.json()); // Parse JSON request bodies
 app.get('/', (req, res) => res.send('Discord Bot Running'));
+
+// GNG obfuscator page (static UI + shared engine, same deploy)
+app.get('/obfuscator', (req, res) =>
+    res.sendFile(path.join(__dirname, 'public', 'obfuscator.html')));
+app.get('/engine.js', (req, res) =>
+    res.sendFile(path.join(__dirname, 'obfuscator', 'engine.js')));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
