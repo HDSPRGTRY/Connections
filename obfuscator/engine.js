@@ -1,22 +1,12 @@
-/* GNG obfuscator engine - ENHANCED VERSION for educational purposes.
+/* GNG obfuscator engine - single-target Lua/Luau source transformer.
  *
  * Shared by the hosted page (public/obfuscator.html) and server-side use.
  * ES3-compatible on purpose (runs in any browser, Node, and cscript).
  *
- * ENHANCED FEATURES:
- * - Dynamic key generation based on runtime values (time, environment properties)
- * - Multi-round encryption with S-box substitution and bit rotation
- * - Sophisticated anti-debugging and tamper detection (timing analysis, debugger detection)
- * - Split decoding logic across multiple functions with indirect calls
- * - Comprehensive environment validation checks (stdlib verification)
- * - Control flow flattening through obfuscated switch statements
- * - Integrity checks and self-modification detection
- * - Virtualized execution simulation for additional obfuscation
- *
  * What it does: strips comments, renames every `local`-scoped identifier
- * with scope-correct resolution, encrypts string literals (multi-layer
- * encryption with dynamic keys), mangles plain integers, prepends
- * multiple decryptor functions with anti-tamper checks + dead locals.
+ * with scope-correct resolution, encrypts string literals (per-literal
+ * random additive key, hex), mangles plain integers, prepends a tiny
+ * additive decryptor + dead locals.
  *
  * Semantics-preserving by construction: globals, _G fields, table fields
  * (after . or :), method names, `self`, and cross-chunk bare globals are
@@ -30,7 +20,7 @@
  * emitting broken code. Re-run with a new seed for a fresh layout.
  *
  * API: gngObfuscate(source, seed, opts) -> {code, stats}
- *   opts: {rename:bool, strings:bool, numbers:bool, antiDebug:bool} (all default true)
+ *   opts: {rename:bool, strings:bool, numbers:bool} (all default true)
  */
 (function (root, factory) {
   var f = factory();
@@ -43,7 +33,6 @@ function gngObfuscate(src, seed, opts) {
   var doRename = opts.rename !== false;
   var doStrings = opts.strings !== false;
   var doNumbers = opts.numbers !== false;
-  var doAntiDebug = opts.antiDebug !== false;
 
   var rngState = (seed >>> 0) || 1;
   function rnd(n) {
@@ -251,75 +240,13 @@ function gngObfuscate(src, seed, opts) {
     }
     return null;
   }
-  /* AES-like S-box for substitution (simplified for educational purposes) */
-  var SBOX = [0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
-              0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
-              0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
-              0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
-              0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
-              0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
-              0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
-              0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
-              0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
-              0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
-              0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
-              0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
-              0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
-              0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
-              0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
-              0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16];
-
-  /* Inverse S-box for decryption */
-  var INV_SBOX = [0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
-                  0x7c,0xe3,0x39,0x82,0x9b,0x2f,0xff,0x87,0x34,0x8e,0x43,0x44,0xc4,0xde,0xe9,0xcb,
-                  0x54,0x7b,0x94,0x32,0xa6,0xc2,0x23,0x3d,0xee,0x4c,0x95,0x0b,0x42,0xfa,0xc3,0x4e,
-                  0x08,0x2e,0xa1,0x66,0x28,0xd9,0x24,0xb2,0x76,0x5b,0xa2,0x49,0x6d,0x8b,0xd1,0x25,
-                  0x72,0xf8,0xf6,0x64,0x86,0x68,0x98,0x16,0xd4,0xa4,0x5c,0xcc,0x5d,0x65,0xb6,0x92,
-                  0x6c,0x70,0x48,0x50,0xfd,0xed,0xb9,0xda,0x5e,0x15,0x46,0x57,0xa7,0x8d,0x9d,0x84,
-                  0x90,0xd8,0xab,0x00,0x8c,0xbc,0xd3,0x0a,0xf7,0xe4,0x58,0x05,0xb8,0xb3,0x45,0x06,
-                  0xd0,0x2c,0x1e,0x8f,0xca,0x3f,0x0f,0x02,0xc1,0xaf,0xbd,0x03,0x01,0x13,0x8a,0x6b,
-                  0x3a,0x91,0x11,0x41,0x4f,0x67,0xdc,0xea,0x97,0xf2,0xcf,0xce,0xf0,0xb4,0xe6,0x73,
-                  0x96,0xac,0x74,0x22,0xe7,0xad,0x35,0x85,0xe2,0xf9,0x37,0xe8,0x1c,0x75,0xdf,0x6e,
-                  0x47,0xf1,0x1a,0x71,0x1d,0x29,0xc5,0x89,0x6f,0xb7,0x62,0x0e,0xaa,0x18,0xbe,0x1b,
-                  0xfc,0x56,0x3e,0x4b,0xc6,0xd2,0x79,0x20,0x9a,0xdb,0xc0,0xfe,0x78,0xcd,0x5a,0xf4,
-                  0x1f,0xdd,0xa8,0x33,0x88,0x07,0xc7,0x31,0xb1,0x12,0x10,0x59,0x27,0x80,0xec,0x5f,
-                  0x60,0x51,0x7f,0xa9,0x19,0xb5,0x4a,0x0d,0x2d,0xe5,0x7a,0x9f,0x93,0xc9,0x9c,0xef,
-                  0xa0,0xe0,0x3b,0x4d,0xae,0x2a,0xf5,0xb0,0xc8,0xeb,0xbb,0x3c,0x83,0x53,0x99,0x61,
-                  0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d];
-
   function cryptBytes(data) {
-    /* Generate dynamic keys based on seed and random values */
-    var key1 = rnd(65536);
-    var key2 = rnd(65536);
-    var key3 = rnd(65536);
-    var rounds = 4 + rnd(4); /* 4-7 rounds of encryption */
-    var hx = '', i, j, b;
-
-    /* Encrypt each byte with multi-layer XOR and bit rotation */
+    var k = 1 + rnd(255), hx = '', i, b;
     for (i = 0; i < data.length; i++) {
-      b = data[i];
-
-      /* Apply multiple rounds of encryption */
-      for (var r = 0; r < rounds; r++) {
-        var roundKey = (key1 + r * key2) ^ key3;
-
-        /* XOR with dynamic key */
-        b = (b ^ (roundKey & 0xFF)) % 256;
-
-        /* S-box substitution */
-        b = SBOX[b];
-
-        /* Bit rotation */
-        b = ((b << 3) | (b >>> 5)) % 256;
-
-        /* XOR with rotated key */
-        b = (b ^ ((roundKey >> 8) & 0xFF)) % 256;
-      }
-
+      b = (data[i] + k) % 256;
       hx += (b < 16 ? '0' : '') + b.toString(16);
     }
-
-    return [hx, key1, key2, key3, rounds];
+    return [hx, k];
   }
   function emitStrTok(tok) {
     var data;
@@ -335,8 +262,8 @@ function gngObfuscate(src, seed, opts) {
     if (la[1] === '=' && BRACE > 0) { emit(tok[1]); stats.str_plain++; return; }
     if (!doStrings) { emit(tok[1]); stats.str_plain++; return; }
     var ck = cryptBytes(data);
-    if (PREV === '[' && la[1] === ']') emit(DEC + '("' + ck[0] + '",' + ck[1] + ',' + ck[2] + ',' + ck[3] + ',' + ck[4] + ')');
-    else emit('(' + DEC + '("' + ck[0] + '",' + ck[1] + ',' + ck[2] + ',' + ck[3] + ',' + ck[4] + '))');
+    if (PREV === '[' && la[1] === ']') emit(DEC + '("' + ck[0] + '",' + ck[1] + ')');
+    else emit('(' + DEC + '("' + ck[0] + '",' + ck[1] + '))');
     stats.str_enc++;
   }
   function emitNum(text) {
@@ -683,115 +610,12 @@ function gngObfuscate(src, seed, opts) {
   parseBlock([]);
   if (POS !== T.length) fail('trailing top-level tokens');
   var body = render(OUT);
-
-  var stub = '';
-  var antiDebugCode = '';
-  var envCheckCode = '';
-  var dynamicKeyGen = '';
-
-  if (doAntiDebug) {
-    antiDebugCode = 'local ' + PREFIX + 'T=os.clock;local ' + PREFIX + 'C=debug.getinfo;';
-    antiDebugCode += 'local ' + PREFIX + 'A=function()if ' + PREFIX + 'C(4)then return true end return false end;';
-    antiDebugCode += 'local ' + PREFIX + 'B=function()local t1=' + PREFIX + 'T()local x=0 for i=1,1000 do x=x+i end local t2=' + PREFIX + 'T()if(t2-t1)>0.1 then return true end return false end;';
-    antiDebugCode += 'local ' + PREFIX + 'DB=function()if ' + PREFIX + 'A()then return true end if ' + PREFIX + 'B()then return true end return false end;';
-    envCheckCode = 'if not _G or type(_G)~="table"then error()end;if type(os.clock)~="function"then error()end;';
-    envCheckCode += 'if type(debug)~="table"then error()end;if type(debug.getinfo)~="function"then error()end;';
-    envCheckCode += 'if type(os.time)~="function"then error()end;if type(collectgarbage)~="function"then error()end;';
-    envCheckCode += 'if type(string)~="table"then error()end;if type(string.byte)~="function"then error()end;';
-    envCheckCode += 'if type(table)~="table"then error()end;if type(table.concat)~="function"then error()end;';
-    envCheckCode += 'if type(math)~="table"then error()end;if type(math.floor)~="function"then error()end;';
-    envCheckCode += 'if not _VERSION then error()end;if type(_VERSION)~="string"then error()end;';
-    dynamicKeyGen = 'local ' + PREFIX + 'RK=function(k)local t=os.time()or 0 local m=collectgarbage("count")or 0 return((k*t)%65536)+((k*m)%65536)end;';
-  }
-
-  /* Inverse S-box for decryption */
-  var invSBoxStr = '';
-  for (var i = 0; i < 256; i++) {
-    invSBoxStr += INV_SBOX[i] + (i < 255 ? ',' : '');
-  }
-
-  var decFunc1 = PREFIX + 'D1';
-  var decFunc2 = PREFIX + 'D2';
-
-  /* Hex to bytes conversion */
-  stub += 'local ' + decFunc1 + '=function(h)local r={}for i=1,#h,2 do r[#r+1]=tonumber(h:sub(i,i+1),16)end return r end;';
-
-  /* Main decryption function - reverse of encryption */
-  stub += 'local ' + decFunc2 + '=function(h,k1,k2,k3,rounds)local s={' + invSBoxStr + '}local r=rounds or 4 local out=""for i=1,#h,2 do local b=tonumber(h:sub(i,i+1),16)for n=r-1,0,-1 do local rk=(k1+n*k2)~k3 b=(b~=((rk>>8)&0xFF))%256 b=((b>>>3)|(b<<5))%256 b=s[b+1] b=(b~=(rk&0xFF))%256 end out=out..string.char(b)end return out end;';
-
-  stub += 'local ' + DEC + '=function(h,k1,k2,k3,rounds)local a=' + decFunc2 + '(h,k1,k2,k3,rounds)return a end;';
-
-  stub += antiDebugCode;
-  stub += envCheckCode;
-  stub += dynamicKeyGen;
-
-  /* Periodic environment validation */
-  if (doAntiDebug) {
-    stub += 'local ' + PREFIX + 'ENV=function()if type(_G)~="table"then error()end if type(os.clock)~="function"then error()end end;';
-    stub += 'local ' + PREFIX + 'EV={' + PREFIX + 'ENV};';
-  }
-
-  /* Control flow flattening - obfuscated switch statement */
-  if (doAntiDebug) {
-    stub += 'local ' + PREFIX + 'CF=0 local ' + PREFIX + 'SM={';
-    stub += '[0]=function()' + PREFIX + 'CF=1 end,';
-    stub += '[1]=function()' + PREFIX + 'CF=2 end,';
-    stub += '[2]=function()' + PREFIX + 'CF=3 end,';
-    stub += '[3]=function()' + PREFIX + 'CF=0 end';
-    stub += '};';
-    stub += 'for i=1,3 do ' + PREFIX + 'SM[' + PREFIX + 'CF]() end;';
-  }
-
-  /* Integrity checks and self-modification detection */
-  if (doAntiDebug) {
-    var icVal = rnd(65536);
-    stub += 'local ' + PREFIX + 'IC=' + icVal + ';';
-    stub += 'local ' + PREFIX + 'ICV=function(v)if ' + PREFIX + 'IC~=v then error()end end;';
-    stub += 'local ' + PREFIX + 'CHT={' + PREFIX + 'ICV};';
-    stub += 'local ' + PREFIX + 'MH=function()local f=debug.getinfo(1)if not f then error()end end;';
-    stub += 'for i=1,2 do ' + PREFIX + 'CHT[1](' + icVal + ') ' + PREFIX + 'MH() end;';
-  }
-
+  var stub = 'local ' + DEC + '=function(h,k)local r={}for i=1,#h,2 do ' +
+    'r[#r+1]=string.char((tonumber(h:sub(i,i+1),16)-k)%256)end ' +
+    'return table.concat(r)end;';
   var junk = '', j;
-  for (j = 0; j < 20; j++) {
-    var junkName = PREFIX + 'J' + j;
-    var junkVal = rnd(10000) + rnd(10000);
-    junk += 'local ' + junkName + '=' + junkVal + ';';
-  }
-
-  /* Additional junk functions for complexity */
-  if (doAntiDebug) {
-    for (j = 0; j < 5; j++) {
-      var junkFunc = PREFIX + 'JF' + j;
-      junk += 'local ' + junkFunc + '=function(x)return x+' + rnd(100) + ' end;';
-    }
-
-    /* Bytecode-level simulation for additional obfuscation */
-    junk += 'local ' + PREFIX + 'VM={';
-    junk += 'push=function(s,x)s[#s+1]=x end,';
-    junk += 'pop=function(s)return table.remove(s)end,';
-    junk += 'add=function(s)local b=s[#s] s[#s]=nil local a=s[#s] s[#s]=a+b end';
-    junk += '};';
-  }
-
-  var deadCode = '';
-  if (doAntiDebug) {
-    deadCode += 'if ' + PREFIX + 'DB()then local ' + PREFIX + 'X=0 for i=1,1000 do ' + PREFIX + 'X=' + PREFIX + 'X+i end end;';
-    deadCode += 'local ' + PREFIX + 'CH=function()if ' + PREFIX + 'DB()then error()end end;';
-    deadCode += 'for i=1,5 do ' + PREFIX + 'CH()end;';
-
-    /* Virtualized execution simulation */
-    deadCode += 'local ' + PREFIX + 'VS={};';
-    deadCode += 'local ' + PREFIX + 'OP={';
-    deadCode += 'function()' + PREFIX + 'VS[#' + PREFIX + 'VS+1]=1 end,';
-    deadCode += 'function()' + PREFIX + 'VS[#' + PREFIX + 'VS+1]=2 end,';
-    deadCode += 'function()local a=' + PREFIX + 'VS[#' + PREFIX + 'VS] ' + PREFIX + 'VS[#' + PREFIX + 'VS]=nil local b=' + PREFIX + 'VS[#' + PREFIX + 'VS] ' + PREFIX + 'VS[#' + PREFIX + 'VS]=a+b end';
-    deadCode += '};';
-    deadCode += 'local ' + PREFIX + 'PC=0 local ' + PREFIX + 'BC={1,2,3,2,1,3};';
-    deadCode += 'for i=1,#' + PREFIX + 'BC do local opc=' + PREFIX + 'BC[i] ' + PREFIX + 'OP[opc]() end;';
-  }
-
-  return {code: stub + junk + deadCode + body + '\n', stats: stats};
+  for (j = 0; j < 6; j++) junk += 'local ' + PREFIX + 'J' + j + '=(' + rnd(10000) + '+' + rnd(10000) + ');';
+  return {code: stub + junk + body + '\n', stats: stats};
 }
 
 return gngObfuscate;
