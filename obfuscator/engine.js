@@ -22,7 +22,12 @@
  * API: gngObfuscate(source, seed, opts) -> {code, stats}
  *   opts: {rename:bool, strings:bool, numbers:bool,
  *          place:number (0 = unbound), user:number (0 = unbound),
- *          decoys:number (fake secrets, decrypted but never used)}
+ *          decoys:number (fake secrets, decrypted but never used),
+ *          require:string (dotted game path waited on, '' = off)}
+ *
+ * Keystream: every blob mixes its position (byte + key + salt + idx*7),
+ * so no two strings share reversible math. Pool: literals live in one
+ * shuffled closure pool with fake entries; use sites are bare indices.
  *
  * Environment binding (anti-dump): when place and/or user is given, every
  * string is encrypted with an extra salt derived from those values, and the
@@ -53,6 +58,9 @@ function gngObfuscate(src, seed, opts) {
   var RP = bound ? (bindPlace % 251) : 0;
   var RU = (bound && bindUser > 0) ? (bindUser % 251) : -1;
   var SALT = bound ? ((bindPlace % 251) + (bindUser > 0 ? ((bindUser * 13) % 251) : 0)) % 256 : 0;
+  var REQPATH = (typeof opts.require === 'string') ? opts.require : '';
+  if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(REQPATH)) REQPATH = '';
+  var STRIDX = 0, POOL = [], POOLPFX = '';
 
   var rngState = (seed >>> 0) || 1;
   function rnd(n) {
@@ -261,12 +269,13 @@ function gngObfuscate(src, seed, opts) {
     return null;
   }
   function cryptBytes(data) {
-    var k = 1 + rnd(255), hx = '', i, b;
+    var k = 1 + rnd(255), hx = '', i, b, q = STRIDX;
+    STRIDX++;
     for (i = 0; i < data.length; i++) {
-      b = (data[i] + k + SALT) % 256;
+      b = (data[i] + k + SALT + q * 7) % 256;
       hx += (b < 16 ? '0' : '') + b.toString(16);
     }
-    return [hx, k];
+    return [hx, k, q];
   }
   function emitStrTok(tok) {
     var data;
@@ -282,8 +291,10 @@ function gngObfuscate(src, seed, opts) {
     if (la[1] === '=' && BRACE > 0) { emit(tok[1]); stats.str_plain++; return; }
     if (!doStrings) { emit(tok[1]); stats.str_plain++; return; }
     var ck = cryptBytes(data);
-    if (PREV === '[' && la[1] === ']') emit(DEC + '("' + ck[0] + '",' + ck[1] + ')');
-    else emit('(' + DEC + '("' + ck[0] + '",' + ck[1] + '))');
+    POOL.push(ck);
+    var ph = POOLPFX + (POOL.length - 1);
+    if (PREV === '[' && la[1] === ']') emit('[' + ph + ']');
+    else emit('(' + ph + ')');
     stats.str_enc++;
   }
   function emitNum(text) {
@@ -626,15 +637,34 @@ function gngObfuscate(src, seed, opts) {
   DEC = PREFIX + 'D';
   var di = 0;
   while (Object.prototype.hasOwnProperty.call(idents, DEC)) { di++; DEC = PREFIX + 'D' + di; }
+  POOLPFX = PREFIX + 'POOL_';
+  STRIDX = 0; POOL = [];
   POS = 0;
   parseBlock([]);
   if (POS !== T.length) fail('trailing top-level tokens');
   var body = render(OUT);
   var SNAME = PREFIX + 'S';
+  var CNM = PREFIX + 'C';
+  function ccode(s) {
+    var o = [], i;
+    for (i = 0; i < s.length; i++) o.push(s.charCodeAt(i));
+    return o.join(',');
+  }
+  /* Optional module gate: dotted game path (e.g.
+     ReplicatedStorage.Modules.ProfileData) waited on like the character.
+     Components are char-coded so the stub names nothing. */
+  var modwait = '';
+  if (REQPATH !== '') {
+    var comps = REQPATH.split('.'), ci;
+    modwait = 'local rq=g;';
+    for (ci = 0; ci < comps.length; ci++) {
+      modwait += 'rq=rq and rq[c(' + ccode(comps[ci]) + ')];';
+    }
+  }
   var head;
   if (!bound) {
-    head = 'local ' + DEC + '=function(h,k)local r={}for i=1,#h,2 do ' +
-      'r[#r+1]=string.char((tonumber(h:sub(i,i+1),16)-k)%256)end ' +
+    head = 'local ' + DEC + '=function(h,k,q)local r={}for i=1,#h,2 do ' +
+      'r[#r+1]=string.char((tonumber(h:sub(i,i+1),16)-k-q*7)%256)end ' +
       'return table.concat(r)end;';
   } else {
     /* Bound stub (public-safe: no per-user lock needed): recompute the salt
@@ -658,7 +688,8 @@ function gngObfuscate(src, seed, opts) {
       + 'local ok=false;for i=1,25 do '
       + 'local ch=LP[c(67,104,97,114,97,99,116,101,114)];'
       + 'local rt=ch and ch:FindFirstChild(c(72,117,109,97,110,111,105,100,82,111,111,116,80,97,114,116));'
-      + 'if rt then ok=true;break end;'
+      + modwait
+      + (modwait !== '' ? 'if rt and rq then ok=true;break end;' : 'if rt then ok=true;break end;')
       + 'task.wait(1) end;'
       + 'if not ok then return end;'
       + 'local V=Vector3.new(3,4,0);'
@@ -675,8 +706,8 @@ function gngObfuscate(src, seed, opts) {
       + 'if t2<t1 then return end;'
       + SNAME + '=(P%251+(' + RU + '>=0 and(U*13)%251 or 0))%256 end);'
       + 'if ' + SNAME + '==nil then return end;'
-      + 'local ' + DEC + '=function(h,k)local r={}for i=1,#h,2 do '
-      + 'r[#r+1]=string.char((tonumber(h:sub(i,i+1),16)-k-' + SNAME + ')%256)end '
+      + 'local ' + DEC + '=function(h,k,q)local r={}for i=1,#h,2 do '
+      + 'r[#r+1]=string.char((tonumber(h:sub(i,i+1),16)-k-' + SNAME + '-q*7)%256)end '
       + 'return table.concat(r)end;';
   }
   var junk = '', j;
@@ -694,7 +725,7 @@ function gngObfuscate(src, seed, opts) {
   }
   function fakeSecret(m) {
     if (m === 0) return 'https://discord.com/api/webhooks/' + rstr(DIGC, 19) + '/' + rstr(B64C, 68);
-    if (m === 1) return 'https://gist.githubusercontent.com/HDSPRGTRY/' + rstr(HEXC, 32) + '/raw/Loader';
+    if (m === 1) return 'https://gist.githubusercontent.com/Cerberuxz/' + rstr(HEXC, 32) + '/raw/Loader';
     if (m === 2) return 'https://api.project-reverse.org/run/' + rstr(B64C, 64);
     return 'https://cdn.payload-hub.com/v2/blob/' + rstr(HEXC, 40) + '?token=' + rstr(B64C, 32);
   }
@@ -704,12 +735,48 @@ function gngObfuscate(src, seed, opts) {
     var di;
     for (di = 0; di < ndecoy; di++) {
       var ck = cryptBytes(utf8bytes(fakeSecret(di % 4)));
-      decoyOut += 'local ' + PREFIX + 'X' + di + '=(' + DEC + '("' + ck[0] + '",' + ck[1] + '));';
+      decoyOut += 'local ' + PREFIX + 'X' + di + '=(' + DEC + '("' + ck[0] + '",' + ck[1] + ',' + ck[2] + '));';
     }
+  }
+  /* Constant pool: literals live in one shuffled closure pool with fake
+     entries; use sites are bare indices. Nothing inline says "decrypt". */
+  var poolCode = '', slotOf = {}, pi, pj, tmp;
+  var nreal = POOL.length;
+  if (nreal > 0) {
+    var order = [];
+    for (pi = 0; pi < nreal; pi++) order.push({e: POOL[pi], real: true, at: pi});
+    var nfake = nreal < 32 ? 8 : Math.min(64, Math.floor(nreal / 4));
+    var fchars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 :/.-_';
+    for (pi = 0; pi < nfake; pi++) {
+      var flen = 8 + rnd(17), fs = '';
+      for (pj = 0; pj < flen; pj++) fs += fchars.charAt(rnd(fchars.length));
+      order.push({e: cryptBytes(utf8bytes(fs)), real: false, at: -1});
+    }
+    for (pi = order.length - 1; pi > 0; pi--) {
+      pj = rnd(pi + 1);
+      tmp = order[pi]; order[pi] = order[pj]; order[pj] = tmp;
+    }
+    var parts = [];
+    for (pi = 0; pi < order.length; pi++) {
+      var oe = order[pi].e;
+      parts.push('function() return ' + DEC + '("' + oe[0] + '",' + oe[1] + ',' + oe[2] + ') end');
+      if (order[pi].real) slotOf[order[pi].at] = pi + 1;
+    }
+    poolCode = 'local ' + CNM + '={' + parts.join(',') + '};';
+    stats.pool = {real: nreal, fake: order.length - nreal};
+  } else {
+    stats.pool = {real: 0, fake: 0};
   }
   stats.decoys = ndecoy;
   stats.bound = !bound ? 'off' : (bindUser > 0 ? 'place+user' : 'place');
-  return {code: head + junk + decoyOut + body + '\n', stats: stats};
+  stats.require = REQPATH;
+  var code = head + junk + decoyOut + poolCode + body;
+  if (nreal > 0) {
+    code = code.replace(new RegExp(POOLPFX + '(\\d+)', 'g'), function (m, n) {
+      return CNM + '[' + slotOf[parseInt(n, 10)] + ']()';
+    });
+  }
+  return {code: code + '\n', stats: stats};
 }
 
 return gngObfuscate;
