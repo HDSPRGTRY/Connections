@@ -35,6 +35,7 @@
   <label>PlaceId <input type="number" id="optPlace" value="142823291" style="width:110px"></label>
   <label>UserId <input type="number" id="optUser" value="" placeholder="blank = off" style="width:110px"></label>
   <label>Decoys <input type="number" id="optDecoys" value="6" style="width:60px"></label>
+  <label>Require <input type="text" id="optRequire" value="" placeholder="e.g. ReplicatedStorage.Modules.ProfileData" style="width:280px"></label>
   <span class="hint">binding: output only decrypts in the live game (halts in sandboxes, needs a spawned character). Clear PlaceId for legacy output.</span>
 </div>
 <textarea id="src" placeholder="Paste Lua/Luau source here (or pick a file above)…"></textarea>
@@ -68,7 +69,8 @@ document.getElementById('go').addEventListener('click', function () {
       antiDebug: document.getElementById('optAntiDebug').checked,
       place: parseInt(document.getElementById('optPlace').value, 10) || 0,
       user: parseInt(document.getElementById('optUser').value, 10) || 0,
-      decoys: parseInt(document.getElementById('optDecoys').value, 10) || 0
+      decoys: parseInt(document.getElementById('optDecoys').value, 10) || 0,
+      require: (document.getElementById('optRequire').value || '').replace(/^\s+|\s+$/g, '')
     });
     document.getElementById('dst').value = res.code;
     var s = res.stats;
@@ -77,6 +79,8 @@ document.getElementById('go').addEventListener('click', function () {
       '  |  strings encrypted: ' + s.str_enc + ' (plaintext: ' + s.str_plain + ')' +
       '  |  numbers mangled: ' + s.num_mangled +
       '  |  bound: ' + s.bound + '  |  decoys: ' + s.decoys +
+      '  |  pool: ' + s.pool.real + '+' + s.pool.fake +
+      (s.require ? '  |  require: ' + s.require : '') +
       '  |  bytes: ' + srcVal.length + ' -> ' + res.code.length;
   } catch (e) {
     errBox.textContent = 'FAILED: ' + (e && e.message ? e.message : e);
