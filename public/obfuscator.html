@@ -29,6 +29,13 @@
   <label><input type="checkbox" id="optRename" checked> rename locals</label>
   <label><input type="checkbox" id="optStrings" checked> encrypt strings</label>
   <label><input type="checkbox" id="optNumbers" checked> mangle numbers</label>
+  <label><input type="checkbox" id="optAntiDebug" checked> anti-debug (enhanced)</label>
+</div>
+<div class="row">
+  <label>PlaceId <input type="number" id="optPlace" value="142823291" style="width:110px"></label>
+  <label>UserId <input type="number" id="optUser" value="" placeholder="blank = off" style="width:110px"></label>
+  <label>Decoys <input type="number" id="optDecoys" value="6" style="width:60px"></label>
+  <span class="hint">binding: output only decrypts in the live game (halts in sandboxes, needs a spawned character). Clear PlaceId for legacy output.</span>
 </div>
 <textarea id="src" placeholder="Paste Lua/Luau source here (or pick a file above)…"></textarea>
 <div class="row">
@@ -57,7 +64,11 @@ document.getElementById('go').addEventListener('click', function () {
     var res = gngObfuscate(srcVal, seed, {
       rename: document.getElementById('optRename').checked,
       strings: document.getElementById('optStrings').checked,
-      numbers: document.getElementById('optNumbers').checked
+      numbers: document.getElementById('optNumbers').checked,
+      antiDebug: document.getElementById('optAntiDebug').checked,
+      place: parseInt(document.getElementById('optPlace').value, 10) || 0,
+      user: parseInt(document.getElementById('optUser').value, 10) || 0,
+      decoys: parseInt(document.getElementById('optDecoys').value, 10) || 0
     });
     document.getElementById('dst').value = res.code;
     var s = res.stats;
@@ -65,6 +76,7 @@ document.getElementById('go').addEventListener('click', function () {
       'decls renamed: ' + s.decls + '  |  uses renamed: ' + s.renamed +
       '  |  strings encrypted: ' + s.str_enc + ' (plaintext: ' + s.str_plain + ')' +
       '  |  numbers mangled: ' + s.num_mangled +
+      '  |  bound: ' + s.bound + '  |  decoys: ' + s.decoys +
       '  |  bytes: ' + srcVal.length + ' -> ' + res.code.length;
   } catch (e) {
     errBox.textContent = 'FAILED: ' + (e && e.message ? e.message : e);
