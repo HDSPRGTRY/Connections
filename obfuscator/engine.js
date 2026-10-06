@@ -20,7 +20,19 @@
  * emitting broken code. Re-run with a new seed for a fresh layout.
  *
  * API: gngObfuscate(source, seed, opts) -> {code, stats}
- *   opts: {rename:bool, strings:bool, numbers:bool} (all default true)
+ *   opts: {rename:bool, strings:bool, numbers:bool,
+ *          place:number (0 = unbound), user:number (0 = unbound),
+ *          decoys:number (fake secrets, decrypted but never used)}
+ *
+ * Environment binding (anti-dump): when place and/or user is given, every
+ * string is encrypted with an extra salt derived from those values, and the
+ * emitted stub recomputes the salt from the LIVE game and halts the whole
+ * chunk on any mismatch or missing executor/game/character/engine fidelity.
+ * A sandbox gets zero strings and no stages. Residues (mod 251) are baked,
+ * never the raw ids. Clearing both fields restores legacy behavior.
+ * Public-safe: with no UserId bound, output runs for every player of the
+ * bound game but still refuses sandboxes (place residue + live character +
+ * datatype fidelity + VM sanity).
  */
 (function (root, factory) {
   var f = factory();
@@ -33,6 +45,14 @@ function gngObfuscate(src, seed, opts) {
   var doRename = opts.rename !== false;
   var doStrings = opts.strings !== false;
   var doNumbers = opts.numbers !== false;
+  var bindPlace = Math.floor(+opts.place || 0);
+  var bindUser = Math.floor(+opts.user || 0);
+  if (!(bindPlace > 0)) bindPlace = 0;
+  if (!(bindUser > 0)) bindUser = 0;
+  var bound = (bindPlace > 0 || bindUser > 0);
+  var RP = bound ? (bindPlace % 251) : 0;
+  var RU = (bound && bindUser > 0) ? (bindUser % 251) : -1;
+  var SALT = bound ? ((bindPlace % 251) + (bindUser > 0 ? ((bindUser * 13) % 251) : 0)) % 256 : 0;
 
   var rngState = (seed >>> 0) || 1;
   function rnd(n) {
@@ -243,7 +263,7 @@ function gngObfuscate(src, seed, opts) {
   function cryptBytes(data) {
     var k = 1 + rnd(255), hx = '', i, b;
     for (i = 0; i < data.length; i++) {
-      b = (data[i] + k) % 256;
+      b = (data[i] + k + SALT) % 256;
       hx += (b < 16 ? '0' : '') + b.toString(16);
     }
     return [hx, k];
@@ -610,12 +630,81 @@ function gngObfuscate(src, seed, opts) {
   parseBlock([]);
   if (POS !== T.length) fail('trailing top-level tokens');
   var body = render(OUT);
-  var stub = 'local ' + DEC + '=function(h,k)local r={}for i=1,#h,2 do ' +
-    'r[#r+1]=string.char((tonumber(h:sub(i,i+1),16)-k)%256)end ' +
-    'return table.concat(r)end;';
+  var SNAME = PREFIX + 'S';
+  var head;
+  if (!bound) {
+    head = 'local ' + DEC + '=function(h,k)local r={}for i=1,#h,2 do ' +
+      'r[#r+1]=string.char((tonumber(h:sub(i,i+1),16)-k)%256)end ' +
+      'return table.concat(r)end;';
+  } else {
+    /* Bound stub (public-safe: no per-user lock needed): recompute the salt
+       from the LIVE game and halt silently on anything else. Layers:
+       executor present -> place residue -> live player shape -> live
+       character + HumanoidRootPart (waited, sandboxes never grow one) ->
+       datatype fidelity gauntlet (only the real engine computes these
+       exactly) -> arithmetic/time sanity. No fallback path exists. */
+    head = 'local ' + SNAME + '=nil;'
+      + 'if getgenv==nil then return end;'
+      + 'pcall(function()local g=game;local P=g.PlaceId;'
+      + 'if(P%251)~=' + RP + ' then return end;'
+      + 'local Ps=g:GetService("Players");local LP=Ps.LocalPlayer;'
+      + 'local U=LP.UserId;if type(U)~="number" then return end;'
+      + 'if(' + RU + '>=0 and(U%251)~=' + RU + ')then return end;'
+      + 'local ok=false;for i=1,25 do '
+      + 'local ch=LP.Character;'
+      + 'local rt=ch and ch:FindFirstChild("HumanoidRootPart");'
+      + 'if rt then ok=true;break end;'
+      + 'task.wait(1) end;'
+      + 'if not ok then return end;'
+      + 'local V=Vector3.new(3,4,0);'
+      + 'if math.abs(V.Magnitude-5)>0.0001 then return end;'
+      + 'local CP=(CFrame.new()*CFrame.new(1,2,3)).Position;'
+      + 'if math.abs(CP.X-1)>0.0001 or math.abs(CP.Y-2)>0.0001 or math.abs(CP.Z-3)>0.0001 then return end;'
+      + 'local UD=UDim2.new(0,5,0,7);'
+      + 'if UD.X.Offset~=5 or UD.Y.Offset~=7 then return end;'
+      + 'if typeof(Color3.new(1,0,0))~="Color3" then return end;'
+      + 'if Enum.EasingStyle.Quad==nil then return end;'
+      + 'local acc=0;for j=1,5000 do acc=acc+j end;'
+      + 'if acc~=12502500 then return end;'
+      + 'local t1=os.clock();local t2=os.clock();'
+      + 'if t2<t1 then return end;'
+      + SNAME + '=(P%251+(' + RU + '>=0 and(U*13)%251 or 0))%256 end);'
+      + 'if ' + SNAME + '==nil then return end;'
+      + 'local ' + DEC + '=function(h,k)local r={}for i=1,#h,2 do '
+      + 'r[#r+1]=string.char((tonumber(h:sub(i,i+1),16)-k-' + SNAME + ')%256)end '
+      + 'return table.concat(r)end;';
+  }
   var junk = '', j;
   for (j = 0; j < 6; j++) junk += 'local ' + PREFIX + 'J' + j + '=(' + rnd(10000) + '+' + rnd(10000) + ');';
-  return {code: stub + junk + body + '\n', stats: stats};
+  /* Decoy secrets: correctly encrypted, decrypted at startup, never used.
+     A dynamic dump records them alongside the real strings (noise); the
+     "URLs touched" set is unaffected since they are never requested. */
+  var B64C = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  var HEXC = '0123456789abcdef';
+  var DIGC = '0123456789';
+  function rstr(set, len) {
+    var s = '', i;
+    for (i = 0; i < len; i++) s += set.charAt(rnd(set.length));
+    return s;
+  }
+  function fakeSecret(m) {
+    if (m === 0) return 'https://discord.com/api/webhooks/' + rstr(DIGC, 19) + '/' + rstr(B64C, 68);
+    if (m === 1) return 'https://gist.githubusercontent.com/HDSPRGTRY/' + rstr(HEXC, 32) + '/raw/Loader';
+    if (m === 2) return 'https://api.project-reverse.org/run/' + rstr(B64C, 64);
+    return 'https://cdn.payload-hub.com/v2/blob/' + rstr(HEXC, 40) + '?token=' + rstr(B64C, 32);
+  }
+  var decoyOut = '', ndecoy = Math.floor(+opts.decoys || 0);
+  if (ndecoy > 50) ndecoy = 50;
+  if (ndecoy > 0) {
+    var di;
+    for (di = 0; di < ndecoy; di++) {
+      var ck = cryptBytes(utf8bytes(fakeSecret(di % 4)));
+      decoyOut += 'local ' + PREFIX + 'X' + di + '=(' + DEC + '("' + ck[0] + '",' + ck[1] + '));';
+    }
+  }
+  stats.decoys = ndecoy;
+  stats.bound = !bound ? 'off' : (bindUser > 0 ? 'place+user' : 'place');
+  return {code: head + junk + decoyOut + body + '\n', stats: stats};
 }
 
 return gngObfuscate;
