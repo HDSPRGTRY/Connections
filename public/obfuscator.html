@@ -370,6 +370,11 @@
       <div class="field"><span class="field-label">decoys</span><input type="number" id="optDecoys" value="6" class="decoy-in"></div>
       <div class="field"><span class="field-label">require</span><input type="text" id="optRequire" value="" placeholder="e.g. ReplicatedStorage.Modules.ProfileData" class="req-in"></div>
     </div>
+    <div class="row">
+      <div class="field"><span class="field-label">bootstrap&nbsp;hex</span><input type="text" id="optBoot" value="" placeholder="vault bootstrap, blank = off" class="req-in"></div>
+      <div class="field"><span class="field-label">vault&nbsp;url</span><input type="text" id="optVault" value="https://connections-234z.onrender.com" placeholder="bot base url" class="req-in"></div>
+      <div class="field"><span class="field-label">script&nbsp;id</span><input type="text" id="optScript" value="" placeholder="e.g. Loader, blank = shared key" class="req-in"></div>
+    </div>
     <div class="hint">Binding: output only decrypts in the live game &mdash; it halts in sandboxes and needs a spawned character. Clear <code>placeId</code> for legacy output.</div>
   </div>
 
@@ -458,6 +463,7 @@
       { k: 'bytes', v: srcLen + ' \u2192 ' + dstLen, cls: '' }
     ];
     if (s.require) items.splice(5, 0, { k: 'require', v: s.require, cls: 'warn' });
+    if (s.vault) items.splice(6, 0, { k: 'vault client', v: 'on' + (s.script ? ' (' + s.script + ')' : ''), cls: 'accent' });
     box.innerHTML = items.map(function(it, i){
       return '<div class="stat" style="animation-delay:' + (i * 30) + 'ms"><div class="k">' + it.k +
         '</div><div class="v' + (it.cls ? ' ' + it.cls : '') + '">' + it.v + '</div></div>';
@@ -484,7 +490,10 @@
           place: parseInt(document.getElementById('optPlace').value, 10) || 0,
           user: parseInt(document.getElementById('optUser').value, 10) || 0,
           decoys: parseInt(document.getElementById('optDecoys').value, 10) || 0,
-          require: (document.getElementById('optRequire').value || '').replace(/^\s+|\s+$/g, '')
+          require: (document.getElementById('optRequire').value || '').replace(/^\s+|\s+$/g, ''),
+          bootstrap: (document.getElementById('optBoot').value || '').replace(/\s+/g, ''),
+          vault: (document.getElementById('optVault').value || '').replace(/\/+$/g, ''),
+          script: (document.getElementById('optScript').value || '').replace(/^\s+|\s+$/g, '')
         });
         dst.value = res.code;
         updateCounts();
