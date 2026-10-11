@@ -13,6 +13,10 @@ app.get('/obfuscator', (req, res) =>
 app.get('/engine.js', (req, res) =>
     res.sendFile(path.join(__dirname, 'obfuscator', 'engine.js')));
 
+// ⚠️ ADDED: MM2 Inventory viewer page
+app.get('/inventory.html', (req, res) =>
+    res.sendFile(path.join(__dirname, 'public', 'inventory.html')));
+
 // ⚠️ ADDED: MM2 Inventory API endpoints
 // Simple in-memory storage for inventory data
 const inventoryData = new Map();
