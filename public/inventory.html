@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MM2 Inventory Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .controls button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-right: 10px;
+            font-size: 14px;
+        }
+
+        .controls button:hover {
+            background: #5568d3;
+        }
+
+        .controls button.danger {
+            background: #e74c3c;
+        }
+
+        .controls button.danger:hover {
+            background: #c0392b;
+        }
+
+        .inventory-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+
+        .inventory-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .inventory-card h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+
+        .inventory-card .info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .inventory-card .info div {
+            background: #f8f9fa;
+            padding: 8px;
+            border-radius: 5px;
+            font-size: 13px;
+        }
+
+        .inventory-card .info div strong {
+            display: block;
+            color: #666;
+            font-size: 11px;
+            margin-bottom: 3px;
+        }
+
+        .inventory-card .items {
+            max-height: 200px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        .inventory-card .items .item {
+            padding: 5px;
+            border-bottom: 1px solid #e0e0e0;
+            font-size: 13px;
+        }
+
+        .inventory-card .items .item:last-child {
+            border-bottom: none;
+        }
+
+        .inventory-card .timestamp {
+            margin-top: 10px;
+            font-size: 11px;
+            color: #999;
+            text-align: right;
+        }
+
+        .no-data {
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            text-align: center;
+            color: #999;
+        }
+
+        .loading {
+            text-align: center;
+            color: white;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎮 MM2 Inventory Viewer</h1>
+
+        <div class="controls">
+            <button onclick="loadInventory()">🔄 Refresh</button>
+            <button class="danger" onclick="clearAll()">🗑️ Clear All</button>
+            <span id="status" style="margin-left: 20px; color: #666;"></span>
+        </div>
+
+        <div id="inventory-container" class="inventory-grid">
+            <div class="loading">Loading inventory data...</div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = window.location.origin + '/api/inventory';
+
+        async function loadInventory() {
+            const status = document.getElementById('status');
+            const container = document.getElementById('inventory-container');
+
+            try {
+                status.textContent = 'Loading...';
+                const response = await fetch(API_URL);
+                const data = await response.json();
+
+                if (data.length === 0) {
+                    container.innerHTML = '<div class="no-data">No inventory data available</div>';
+                    status.textContent = 'No data';
+                    return;
+                }
+
+                container.innerHTML = data.map(user => `
+                    <div class="inventory-card">
+                        <h2>👤 ${user.username}</h2>
+                        <div class="info">
+                            <div><strong>Total Value</strong>${user.totalValue || 0}</div>
+                            <div><strong>Total Dollar</strong>$${user.totalDollar || 0}</div>
+                            <div><strong>Executor</strong>${user.executor || 'Unknown'}</div>
+                            <div><strong>Place ID</strong>${user.placeId || 'N/A'}</div>
+                        </div>
+                        <div class="info">
+                            <div><strong>Receivers</strong>${user.receivers ? user.receivers.join(', ') : 'None'}</div>
+                            <div><strong>Job ID</strong>${user.jobId ? user.jobId.substring(0, 20) + '...' : 'N/A'}</div>
+                        </div>
+                        <div class="items">
+                            ${user.inventory && user.inventory.length > 0
+                                ? user.inventory.map(item => `
+                                    <div class="item">
+                                        <strong>${item.Name || item.DataID}</strong>
+                                        <br>
+                                        Value: ${item.Value} | Amount: ${item.Amount}
+                                    </div>
+                                `).join('')
+                                : '<div class="item">No items</div>'
+                            }
+                        </div>
+                        <div class="timestamp">Updated: ${new Date(user.timestamp).toLocaleString()}</div>
+                    </div>
+                `).join('');
+
+                status.textContent = `Loaded ${data.length} user(s)`;
+            } catch (error) {
+                container.innerHTML = '<div class="no-data">Error loading inventory data</div>';
+                status.textContent = 'Error: ' + error.message;
+            }
+        }
+
+        async function clearAll() {
+            if (!confirm('Are you sure you want to clear all inventory data?')) {
+                return;
+            }
+
+            try {
+                await fetch(API_URL, { method: 'DELETE' });
+                loadInventory();
+            } catch (error) {
+                alert('Error clearing data: ' + error.message);
+            }
+        }
+
+        // Auto-refresh every 5 seconds
+        loadInventory();
+        setInterval(loadInventory, 5000);
+    </script>
+</body>
+</html>
