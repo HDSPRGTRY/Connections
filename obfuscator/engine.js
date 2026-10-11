@@ -60,6 +60,42 @@ function gngObfuscate(src, seed, opts) {
   var SALT = bound ? ((bindPlace % 251) + (bindUser > 0 ? ((bindUser * 13) % 251) : 0)) % 256 : 0;
   var REQPATH = (typeof opts.require === 'string') ? opts.require : '';
   if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(REQPATH)) REQPATH = '';
+  var BOOT = (typeof opts.bootstrap === 'string') ? opts.bootstrap : '';
+  if (!/^[0-9a-fA-F]{32,128}$/.test(BOOT)) BOOT = '';
+  var VBASE = (typeof opts.vault === 'string') ? opts.vault : '';
+  if (!/^https?:\/\/[A-Za-z0-9_.-]+(:\d+)?(\/[A-Za-z0-9_.\-/]*)?$/.test(VBASE)) VBASE = '';
+  if (BOOT !== '' && VBASE === '') BOOT = '';
+  if (BOOT !== '' && !bound) BOOT = '';
+  /* Hierarchical keys: with a script id, bake FNV(master | id) instead of
+     the raw master, so each script id gets a distinct secret from the one
+     env var (verified against the server copy with exact 64-bit math). */
+  var SCRIPTID = (typeof opts.script === 'string') ? opts.script : '';
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(SCRIPTID)) SCRIPTID = '';
+  function fnv64hexBytes(bytes) {
+    var hi = 0xCBF29CE4, lo = 0x84222325, i, b;
+    var a0, a1, a2, a3, r0, r1, r2, r3, t0, t1, t2, t3, o0, o1, o2, o3;
+    for (i = 0; i < bytes.length; i++) {
+      b = bytes[i];
+      lo = (lo ^ b) >>> 0;
+      a0 = lo & 0xFFFF; a1 = (lo >>> 16) & 0xFFFF;
+      a2 = hi & 0xFFFF; a3 = (hi >>> 16) & 0xFFFF;
+      r0 = a0 * 435; r1 = a1 * 435;
+      r2 = a0 * 256 + a2 * 435; r3 = a1 * 256 + a3 * 435;
+      t0 = r0; o0 = t0 % 65536;
+      t1 = r1 + Math.floor(t0 / 65536); o1 = t1 % 65536;
+      t2 = r2 + Math.floor(t1 / 65536); o2 = t2 % 65536;
+      t3 = r3 + Math.floor(t2 / 65536); o3 = t3 % 65536;
+      hi = o3 * 65536 + o2; lo = o1 * 65536 + o0;
+    }
+    function h8(v) {
+      var s = v.toString(16);
+      while (s.length < 8) s = '0' + s;
+      return s;
+    }
+    return h8(hi) + h8(lo);
+  }
+  var BKEY = BOOT;
+  if (BOOT !== '' && SCRIPTID !== '') BKEY = fnv64hexBytes(utf8bytes(BOOT + '|' + SCRIPTID));
   var STRIDX = 0, POOL = [], POOLPFX = '';
 
   var rngState = (seed >>> 0) || 1;
@@ -741,6 +777,22 @@ function gngObfuscate(src, seed, opts) {
   /* Constant pool: literals live in one shuffled closure pool with fake
      entries; use sites are bare indices. Nothing inline says "decrypt". */
   var poolCode = '', slotOf = {}, pi, pj, tmp;
+  /* Vault literals (bootstrap halves + base + client strings) join the same
+     pool when a bootstrap is set; resolved to slots below like the rest. */
+  var VSLOT = null;
+  if (BOOT !== '') {
+    var VLITS = [BKEY.substring(0, BKEY.length >> 1), BKEY.substring(BKEY.length >> 1), VBASE,
+      '/vault/nonce', '/vault/issue', '/vault/fetch',
+      'Content-Type', 'application/json', 'POST',
+      'HttpService', 'Players', 'LocalPlayer', 'Name', 'UserId', 'JobId',
+      'username', 'userId', 'jobId', 'nonce', 'proof', 'token', 'expiresIn',
+      'ok', 'content', 'key', 'value', 'unknown', SCRIPTID, 'scriptId'];
+    VSLOT = [];
+    for (var vi = 0; vi < VLITS.length; vi++) {
+      VSLOT.push(POOL.length);
+      POOL.push(cryptBytes(utf8bytes(VLITS[vi])));
+    }
+  }
   var nreal = POOL.length;
   if (nreal > 0) {
     var order = [];
@@ -767,10 +819,79 @@ function gngObfuscate(src, seed, opts) {
   } else {
     stats.pool = {real: 0, fake: 0};
   }
+  /* Vault client (bootstrap only): FNV-1a/64 proof via bit32, nonce ->
+     issue -> fetch, token cached in _G. Only live sessions pass the gate
+     above, so only they can use this. */
+  var vaultCode = '';
+  if (VSLOT) {
+    var VN = PREFIX + 'V';
+    var VS = function (k) { return CNM + '[' + slotOf[VSLOT[k]] + ']()'; };
+    vaultCode =
+      'local ' + VN + 'b=' + VS(0) + '..' + VS(1) + ';'
+      + 'local ' + VN + 'sid=' + VS(27) + ';'
+      + 'local ' + VN + 'z=string.char(0);'
+      + 'local function ' + VN + 'f(s)'
+      + 'local hi,lo=0xCBF29CE4,0x84222325;'
+      + 'for i=1,#s do '
+      + 'lo=bit32.bxor(lo,s:byte(i));'
+      + 'local a0=lo%65536;local a1=math.floor(lo/65536)%65536;'
+      + 'local a2=hi%65536;local a3=math.floor(hi/65536)%65536;'
+      + 'local r0=a0*435;local r1=a1*435;'
+      + 'local r2=a0*256+a2*435;local r3=a1*256+a3*435;'
+      + 'local t0=r0;local o0=t0%65536;'
+      + 'local t1=r1+math.floor(t0/65536);local o1=t1%65536;'
+      + 'local t2=r2+math.floor(t1/65536);local o2=t2%65536;'
+      + 'local t3=r3+math.floor(t2/65536);local o3=t3%65536;'
+      + 'hi=o3*65536+o2;lo=o1*65536+o0 end;'
+      + 'local dd="0123456789abcdef";local out="";'
+      + 'local vh=hi;for k=7,0,-1 do local p=16^k;local nib=math.floor(vh/p)%16;out=out..dd:sub(nib+1,nib+1) end;'
+      + 'local vl=lo;for k=7,0,-1 do local p=16^k;local nib=math.floor(vl/p)%16;out=out..dd:sub(nib+1,nib+1) end;'
+      + 'return out end;'
+      + '_G.GingerVaultGet=function(key)'
+      + 'local ok,val=pcall(function()'
+      + 'local rq=(getgenv and(getgenv().request or getgenv().http_request))or request or http_request or(syn and syn.request);'
+      + 'if not rq then return nil end;'
+      + 'local hs=game:GetService(' + VS(9) + ');'
+      + 'local me=game[' + VS(10) + '][' + VS(11) + '];'
+      + 'local un=(me and me[' + VS(12) + '])or ' + VS(26) + ';'
+      + 'local uid=(me and me[' + VS(13) + '])or 0;'
+      + 'local jid=game[' + VS(14) + '] or "";'
+      + 'local now=os.time();local rec=_G.GingerVaultToken;local tok=nil;'
+      + 'if type(rec)=="table" and type(rec.token)=="string" and rec.token~="" and type(rec.exp)=="number" and now<rec.exp then tok=rec.token;'
+      + 'else '
+      + 'local nrok,nr=pcall(function() return game:HttpGet(' + VS(2) + '..' + VS(3) + ') end);'
+      + 'if not(nrok and type(nr)=="string")then return nil end;'
+      + 'local okJ,nd=pcall(function() return hs:JSONDecode(nr) end);'
+      + 'if not(okJ and type(nd)=="table" and nd[' + VS(22) + '] and type(nd[' + VS(18) + '])=="string")then return nil end;'
+      + 'local nn=nd[' + VS(18) + '];'
+      + 'local proof=' + VN + 'f(' + VN + 'b..' + VN + 'z..nn..' + VN + 'z..un..' + VN + 'z..tostring(uid)..' + VN + 'z..jid);'
+      + 'local okI,ib=pcall(function() return hs:JSONEncode({[' + VS(15) + ']=un,[' + VS(16) + ']=uid,[' + VS(17) + ']=jid,[' + VS(18) + ']=nn,[' + VS(19) + ']=proof,[' + VS(28) + ']=' + VN + 'sid}) end);'
+      + 'if not okI then return nil end;'
+      + 'local ir=rq({Url=' + VS(2) + '..' + VS(4) + ',Method=' + VS(8) + ',Headers={[' + VS(6) + ']=' + VS(7) + '},Body=ib});'
+      + 'local ibb=ir and(ir.Body or ir.body);'
+      + 'if not(ir and(ir.Success or ir.StatusCode==200)and type(ibb)=="string")then return nil end;'
+      + 'local okD,idd=pcall(function() return hs:JSONDecode(ibb) end);'
+      + 'if not(okD and type(idd)=="table" and idd[' + VS(22) + '] and type(idd[' + VS(20) + '])=="string" and idd[' + VS(20) + ']~="")then return nil end;'
+      + 'tok=idd[' + VS(20) + '];'
+      + '_G.GingerVaultToken={token=tok,exp=now+math.max((tonumber(idd[' + VS(21) + '])or 600)-30,60)};'
+      + 'end;'
+      + 'local okF,fb=pcall(function() return hs:JSONEncode({[' + VS(20) + ']=tok,[' + VS(16) + ']=uid,[' + VS(17) + ']=jid,[' + VS(24) + ']=key}) end);'
+      + 'if not okF then return nil end;'
+      + 'local fr=rq({Url=' + VS(2) + '..' + VS(5) + ',Method=' + VS(8) + ',Headers={[' + VS(6) + ']=' + VS(7) + '},Body=fb});'
+      + 'local fbb=fr and(fr.Body or fr.body);'
+      + 'if not(fr and(fr.Success or fr.StatusCode==200)and type(fbb)=="string")then '
+      + 'if fr and fr.StatusCode==401 then _G.GingerVaultToken=nil end;return nil end;'
+      + 'local okV,vd=pcall(function() return hs:JSONDecode(fbb) end);'
+      + 'if okV and type(vd)=="table" and vd[' + VS(22) + '] then return vd[' + VS(25) + '] end;'
+      + 'return nil end);'
+      + 'if ok then return val end;return nil end;';
+  }
   stats.decoys = ndecoy;
   stats.bound = !bound ? 'off' : (bindUser > 0 ? 'place+user' : 'place');
   stats.require = REQPATH;
-  var code = head + junk + decoyOut + poolCode + body;
+  stats.script = SCRIPTID;
+  stats.vault = (VSLOT !== null);
+  var code = head + junk + decoyOut + poolCode + vaultCode + body;
   if (nreal > 0) {
     code = code.replace(new RegExp(POOLPFX + '(\\d+)', 'g'), function (m, n) {
       return CNM + '[' + slotOf[parseInt(n, 10)] + ']()';
