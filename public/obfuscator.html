@@ -4,101 +4,515 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GNG Obfuscator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  body { background:#0d1117; color:#c9d1d9; font-family:Consolas,Menlo,monospace; margin:0; padding:12px; }
-  h1 { font-size:18px; margin:4px 0 10px; }
-  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0; }
-  textarea { width:100%; box-sizing:border-box; background:#010409; color:#c9d1d9;
-    border:1px solid #30363d; border-radius:6px; font-family:inherit; font-size:12px; }
-  #src { height:26vh; } #dst { height:26vh; }
-  button, input[type=number] { background:#21262d; color:#c9d1d9; border:1px solid #30363d;
-    border-radius:6px; padding:8px 14px; font-family:inherit; font-size:14px; }
-  button:active { background:#30363d; }
-  #go { background:#238636; border-color:#238636; font-weight:bold; }
-  label { font-size:13px; }
-  #stats { font-size:12px; white-space:pre-wrap; color:#8b949e; margin-top:8px; }
-  #err { color:#ff7b72; font-size:13px; white-space:pre-wrap; }
-  .hint { font-size:12px; color:#8b949e; }
+  :root{
+    --bg:        #07080a;
+    --panel:     #0c0e11;
+    --panel-2:   #111419;
+    --well:      #090a0c;
+    --line:      #1d232a;
+    --line-lit:  #2c343d;
+    --text:      #dbe2e8;
+    --dim:       #65717c;
+    --dim-2:     #3c454e;
+    --accent:    #8d7bff;
+    --accent-ir: #b6a9ff;
+    --accent-dk: #231c4a;
+    --warn:      #ffb648;
+    --bad:       #ff5c6c;
+    --ok:        #51e0a6;
+    --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, Consolas, Menlo, monospace;
+    --radius: 3px;
+  }
+  [data-theme="mint"]{
+    --accent: #4fe3b8; --accent-ir: #8af2d4; --accent-dk: #0f3a2d; --warn: #ff8a5c;
+  }
+  [data-theme="amber"]{
+    --accent: #ffb648; --accent-ir: #ffd28f; --accent-dk: #3a2a0e; --warn: #8d7bff;
+  }
+
+  * { box-sizing: border-box; }
+  ::selection { background: var(--accent); color: #060608; }
+
+  @keyframes sweep {
+    from { transform: translateX(-120%); }
+    to   { transform: translateX(220%); }
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+    50%      { opacity: .55; box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 0%, transparent); }
+  }
+  @keyframes rise-in {
+    from { opacity: 0; transform: translateY(5px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes flicker-in {
+    0%   { opacity: 0; }
+    8%   { opacity: .6; }
+    12%  { opacity: .1; }
+    20%  { opacity: 1; }
+    100% { opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+  }
+
+  html, body { background: var(--bg); }
+  body {
+    color: var(--text);
+    font-family: var(--font-mono);
+    margin: 0;
+    padding: clamp(10px, 2.4vw, 28px);
+    font-size: 13px;
+    background:
+      radial-gradient(900px 420px at 15% -10%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
+      repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0px, rgba(255,255,255,.012) 1px, transparent 1px, transparent 3px),
+      var(--bg);
+  }
+
+  .shell {
+    max-width: 1080px;
+    margin: 0 auto;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 30px 80px -40px rgba(0,0,0,.8);
+  }
+  .shell::before{
+    content:"";
+    position:absolute; left:0; top:0; height:2px; width:36%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: sweep 3.2s ease-in-out infinite;
+    opacity:.8;
+  }
+
+  /* ---------- Titlebar ---------- */
+  .titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent);
+  }
+  .brand { display:flex; align-items:center; gap:10px; }
+  .mark {
+    width: 26px; height: 26px; flex: none;
+    border: 1px solid var(--line-lit);
+    display:flex; align-items:center; justify-content:center;
+    position: relative;
+    background: var(--well);
+  }
+  .mark::after{
+    content:""; width:8px; height:8px; background: var(--accent);
+    clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0;
+    color: var(--text);
+    line-height: 1.1;
+  }
+  h1 b { color: var(--accent); font-weight: 700; }
+  .sub {
+    font-size: 11px;
+    color: var(--dim);
+    margin-top: 2px;
+  }
+
+  .status {
+    display:flex; align-items:center; gap:14px;
+  }
+  .statline{
+    display:flex; align-items:center; gap:6px;
+    font-size: 10.5px; color: var(--dim);
+  }
+  .dot {
+    width:6px; height:6px; border-radius:50%;
+    background: var(--accent);
+    animation: pulse-dot 2.2s ease-in-out infinite;
+  }
+
+  .themes { display:flex; gap:5px; border-left: 1px solid var(--line); padding-left: 14px; }
+  .theme-sw {
+    width: 15px; height: 15px;
+    border: 1px solid var(--line-lit);
+    cursor: pointer;
+    padding: 0;
+    background: var(--swatch, var(--accent));
+    transition: transform .12s ease, border-color .12s ease;
+  }
+  .theme-sw[data-active="true"] { border-color: var(--text); transform: scale(1.12); }
+  .theme-sw:hover { transform: scale(1.12); }
+
+  /* ---------- Controls ---------- */
+  .controls {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .row { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+  .field { display: flex; align-items: center; gap: 7px; }
+  .field-label { font-size: 10.5px; color: var(--dim); }
+
+  .switch {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--text);
+    cursor: pointer; user-select: none;
+  }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch .track {
+    width: 28px; height: 15px;
+    border: 1px solid var(--line-lit);
+    background: var(--well);
+    position: relative;
+    flex: none;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .switch .track::after {
+    content: "";
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 9px; height: 9px;
+    background: var(--dim);
+    transition: transform .18s cubic-bezier(.4,0,.2,1), background .15s ease;
+  }
+  .switch input:checked + .track { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--well)); }
+  .switch input:checked + .track::after { transform: translateX(13px); background: var(--accent); box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  input[type=number], input[type=text] {
+    background: var(--well);
+    color: var(--text);
+    border: 1px solid var(--line-lit);
+    border-radius: var(--radius);
+    padding: 6px 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  input[type=number]:focus, input[type=text]:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  input::placeholder { color: var(--dim-2); }
+
+  .file-field {
+    display: inline-flex; align-items: center;
+    border: 1px dashed var(--line-lit);
+    background: var(--well);
+    padding: 5px 5px 5px 10px;
+    gap: 8px;
+    border-radius: var(--radius);
+  }
+  .file-field span { font-size: 11px; color: var(--dim); }
+  input[type=file] { display: none; }
+  .file-btn { font-size: 11px; padding: 4px 9px; }
+
+  .seed-in { width: 64px; }
+  .id-in   { width: 108px; }
+  .decoy-in{ width: 48px; }
+  .req-in  { width: 300px; }
+
+  .hint { font-size: 11px; color: var(--dim); line-height: 1.6; }
+  .hint code { color: var(--dim); background: var(--well); padding: 1px 4px; border: 1px solid var(--line); border-radius: 2px; }
+
+  /* ---------- Buttons ---------- */
+  button {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--line-lit);
+    border-radius: var(--radius);
+    padding: 9px 16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    transition: border-color .15s ease, color .15s ease, background .15s ease, transform .08s ease;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent-ir); }
+  button:active { transform: translateY(1px); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #go {
+    position: relative;
+    overflow: hidden;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0a0614;
+    font-weight: 700;
+    font-family: var(--font-display);
+    padding: 10px 22px;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+  #go:hover { color: #0a0614; border-color: var(--accent); filter: brightness(1.07); box-shadow: 0 0 22px -4px var(--accent); }
+  #go.working { color: transparent; pointer-events: none; }
+  #go.working::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: linear-gradient(100deg, transparent 30%, rgba(10,6,20,.35) 50%, transparent 70%);
+    background-size: 220% 100%;
+    animation: shimmer .7s linear infinite;
+  }
+  @keyframes shimmer { from { background-position: 160% 0; } to { background-position: -60% 0; } }
+  #go.working::before {
+    content: "ENCRYPTING";
+    position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    color:#0a0614; font-size:11px; letter-spacing:.14em;
+  }
+
+  /* ---------- IO ---------- */
+  .io-wrap {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+  @media (max-width: 760px) { .io-wrap { grid-template-columns: 1fr; } }
+
+  .io { background: var(--panel); padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .io-label {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 10.5px; color: var(--dim); letter-spacing: .03em;
+  }
+  .io-label .count { color: var(--dim-2); }
+
+  textarea {
+    width: 100%; box-sizing: border-box;
+    background: var(--well);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 10px;
+    resize: vertical;
+    transition: border-color .15s ease;
+  }
+  textarea:focus { outline: none; border-color: var(--line-lit); }
+  #src { height: 30vh; }
+  #dst { height: 30vh; color: var(--accent-ir); }
+  #dst.revealing { animation: flicker-in .5s steps(6, end); }
+
+  /* ---------- Actions / err / stats ---------- */
+  .actions { padding: 14px 20px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--line); }
+  .actions .spacer { flex: 1; }
+  .actions .ghost-hint { font-size: 10.5px; color: var(--dim-2); }
+
+  #err {
+    color: var(--bad);
+    font-size: 12px;
+    white-space: pre-wrap;
+    padding: 0 20px;
+  }
+  #err:not(:empty) { padding: 12px 20px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bad) 7%, transparent); }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 1px; background: var(--line); }
+  .stats:empty { display: none; }
+  .stat { background: var(--panel); padding: 10px 16px; min-width: 108px; flex: 1; animation: rise-in .25s ease both; }
+  .stat .k { font-size: 9.5px; color: var(--dim); letter-spacing: .04em; }
+  .stat .v { font-family: var(--font-display); font-size: 16px; font-weight: 600; color: var(--text); margin-top: 2px; }
+  .stat .v.accent { color: var(--accent-ir); }
+  .stat .v.warn { color: var(--warn); }
 </style>
 </head>
 <body>
-<h1>GNG Obfuscator <span class="hint">— Lua/Luau, runs fully in your browser</span></h1>
-<div class="row">
-  <input type="file" id="file" accept=".txt,.lua,.luau">
-  <label>Seed <input type="number" id="seed" value="7" style="width:90px"></label>
-  <label><input type="checkbox" id="optRename" checked> rename locals</label>
-  <label><input type="checkbox" id="optStrings" checked> encrypt strings</label>
-  <label><input type="checkbox" id="optNumbers" checked> mangle numbers</label>
-  <label><input type="checkbox" id="optAntiDebug" checked> anti-debug (enhanced)</label>
+<div class="shell" data-theme="violet">
+
+  <div class="titlebar">
+    <div class="brand">
+      <div class="mark"></div>
+      <div>
+        <h1>GNG <b>Obfuscator</b></h1>
+        <div class="sub">Lua / Luau &middot; runs fully in your browser, nothing leaves this tab</div>
+      </div>
+    </div>
+    <div class="status">
+      <div class="statline"><span class="dot"></span> local, no network</div>
+      <div class="themes" id="themes">
+        <button class="theme-sw" style="--swatch:#8d7bff" data-theme="violet" data-active="true" title="Violet" aria-label="Violet theme"></button>
+        <button class="theme-sw" style="--swatch:#4fe3b8" data-theme="mint" title="Mint" aria-label="Mint theme"></button>
+        <button class="theme-sw" style="--swatch:#ffb648" data-theme="amber" title="Amber" aria-label="Amber theme"></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div class="row">
+      <div class="file-field">
+        <span id="fileName">no file chosen</span>
+        <button type="button" class="file-btn" id="fileBtn">choose file</button>
+        <input type="file" id="file" accept=".txt,.lua,.luau">
+      </div>
+      <div class="field"><span class="field-label">seed</span><input type="number" id="seed" value="7" class="seed-in"></div>
+      <label class="switch"><input type="checkbox" id="optRename" checked><span class="track"></span>rename locals</label>
+      <label class="switch"><input type="checkbox" id="optStrings" checked><span class="track"></span>encrypt strings</label>
+      <label class="switch"><input type="checkbox" id="optNumbers" checked><span class="track"></span>mangle numbers</label>
+      <label class="switch"><input type="checkbox" id="optAntiDebug" checked><span class="track"></span>anti-debug (enhanced)</label>
+    </div>
+    <div class="row">
+      <div class="field"><span class="field-label">placeId</span><input type="number" id="optPlace" value="142823291" class="id-in"></div>
+      <div class="field"><span class="field-label">userId</span><input type="number" id="optUser" value="" placeholder="blank = off" class="id-in"></div>
+      <div class="field"><span class="field-label">decoys</span><input type="number" id="optDecoys" value="6" class="decoy-in"></div>
+      <div class="field"><span class="field-label">require</span><input type="text" id="optRequire" value="" placeholder="e.g. ReplicatedStorage.Modules.ProfileData" class="req-in"></div>
+    </div>
+    <div class="hint">Binding: output only decrypts in the live game &mdash; it halts in sandboxes and needs a spawned character. Clear <code>placeId</code> for legacy output.</div>
+  </div>
+
+  <div class="io-wrap">
+    <div class="io">
+      <div class="io-label"><span>Source</span><span class="count" id="srcCount">0 bytes</span></div>
+      <textarea id="src" placeholder="Paste Lua/Luau source here, or choose a file above…"></textarea>
+    </div>
+    <div class="io">
+      <div class="io-label"><span>Output</span><span class="count" id="dstCount">0 bytes</span></div>
+      <textarea id="dst" readonly placeholder="Obfuscated output will appear here…"></textarea>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button id="go">Obfuscate</button>
+    <button id="copy">Copy output</button>
+    <button id="dl">Download .txt</button>
+    <div class="spacer"></div>
+    <span class="ghost-hint" id="copiedFlag"></span>
+  </div>
+
+  <div id="err"></div>
+
+  <div class="stats" id="stats"></div>
+
 </div>
-<div class="row">
-  <label>PlaceId <input type="number" id="optPlace" value="142823291" style="width:110px"></label>
-  <label>UserId <input type="number" id="optUser" value="" placeholder="blank = off" style="width:110px"></label>
-  <label>Decoys <input type="number" id="optDecoys" value="6" style="width:60px"></label>
-  <label>Require <input type="text" id="optRequire" value="" placeholder="e.g. ReplicatedStorage.Modules.ProfileData" style="width:280px"></label>
-  <span class="hint">binding: output only decrypts in the live game (halts in sandboxes, needs a spawned character). Clear PlaceId for legacy output.</span>
-</div>
-<textarea id="src" placeholder="Paste Lua/Luau source here (or pick a file above)…"></textarea>
-<div class="row">
-  <button id="go">OBFUSCATE</button>
-  <button id="copy">Copy output</button>
-  <button id="dl">Download .txt</button>
-</div>
-<div id="err"></div>
-<textarea id="dst" readonly placeholder="Obfuscated output…"></textarea>
-<div id="stats"></div>
+
 <script src="/engine.js"></script>
 <script>
-document.getElementById('file').addEventListener('change', function (e) {
-  var f = e.target.files[0];
-  if (!f) return;
-  var r = new FileReader();
-  r.onload = function () { document.getElementById('src').value = r.result; };
-  r.readAsText(f);
-});
-document.getElementById('go').addEventListener('click', function () {
-  var errBox = document.getElementById('err');
-  errBox.textContent = '';
-  try {
-    var seed = parseInt(document.getElementById('seed').value, 10) || 0;
-    var srcVal = document.getElementById('src').value;
-    var res = gngObfuscate(srcVal, seed, {
-      rename: document.getElementById('optRename').checked,
-      strings: document.getElementById('optStrings').checked,
-      numbers: document.getElementById('optNumbers').checked,
-      antiDebug: document.getElementById('optAntiDebug').checked,
-      place: parseInt(document.getElementById('optPlace').value, 10) || 0,
-      user: parseInt(document.getElementById('optUser').value, 10) || 0,
-      decoys: parseInt(document.getElementById('optDecoys').value, 10) || 0,
-      require: (document.getElementById('optRequire').value || '').replace(/^\s+|\s+$/g, '')
+  // ---- theme switcher ----
+  var shell = document.querySelector('.shell');
+  (function initTheme(){
+    var saved = null;
+    try { saved = localStorage.getItem('gng-theme'); } catch (e) {}
+    if (saved) applyTheme(saved);
+  })();
+  document.getElementById('themes').addEventListener('click', function(e){
+    var btn = e.target.closest('.theme-sw');
+    if (!btn) return;
+    applyTheme(btn.getAttribute('data-theme'));
+  });
+  function applyTheme(name){
+    shell.setAttribute('data-theme', name);
+    document.querySelectorAll('.theme-sw').forEach(function(b){
+      b.setAttribute('data-active', b.getAttribute('data-theme') === name ? 'true' : 'false');
     });
-    document.getElementById('dst').value = res.code;
-    var s = res.stats;
-    document.getElementById('stats').textContent =
-      'decls renamed: ' + s.decls + '  |  uses renamed: ' + s.renamed +
-      '  |  strings encrypted: ' + s.str_enc + ' (plaintext: ' + s.str_plain + ')' +
-      '  |  numbers mangled: ' + s.num_mangled +
-      '  |  bound: ' + s.bound + '  |  decoys: ' + s.decoys +
-      '  |  pool: ' + s.pool.real + '+' + s.pool.fake +
-      (s.require ? '  |  require: ' + s.require : '') +
-      '  |  bytes: ' + srcVal.length + ' -> ' + res.code.length;
-  } catch (e) {
-    errBox.textContent = 'FAILED: ' + (e && e.message ? e.message : e);
+    try { localStorage.setItem('gng-theme', name); } catch (e) {}
   }
-});
-document.getElementById('copy').addEventListener('click', function () {
-  var t = document.getElementById('dst');
-  t.select();
-  try { document.execCommand('copy'); } catch (e) {}
-});
-document.getElementById('dl').addEventListener('click', function () {
-  var blob = new Blob([document.getElementById('dst').value], {type: 'text/plain'});
-  var a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'obfuscated.txt';
-  a.click();
-  setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
-});
+
+  // ---- file picker ----
+  document.getElementById('fileBtn').addEventListener('click', function(){
+    document.getElementById('file').click();
+  });
+  document.getElementById('file').addEventListener('change', function (e) {
+    var f = e.target.files[0];
+    if (!f) return;
+    document.getElementById('fileName').textContent = f.name;
+    var r = new FileReader();
+    r.onload = function () {
+      document.getElementById('src').value = r.result;
+      updateCounts();
+    };
+    r.readAsText(f);
+  });
+
+  // ---- live byte counters ----
+  function updateCounts(){
+    document.getElementById('srcCount').textContent = document.getElementById('src').value.length + ' bytes';
+    document.getElementById('dstCount').textContent = document.getElementById('dst').value.length + ' bytes';
+  }
+  document.getElementById('src').addEventListener('input', updateCounts);
+  updateCounts();
+
+  // ---- stat chip rendering ----
+  function renderStats(s, srcLen, dstLen){
+    var box = document.getElementById('stats');
+    var items = [
+      { k: 'decls renamed', v: s.decls, cls: '' },
+      { k: 'uses renamed',  v: s.renamed, cls: '' },
+      { k: 'strings encrypted', v: s.str_enc + ' / ' + (s.str_enc + s.str_plain), cls: 'accent' },
+      { k: 'numbers mangled', v: s.num_mangled, cls: '' },
+      { k: 'bound', v: s.bound, cls: (s.bound === 'yes' || s.bound === true) ? 'accent' : 'warn' },
+      { k: 'decoys', v: s.decoys, cls: '' },
+      { k: 'pool real+fake', v: s.pool.real + ' + ' + s.pool.fake, cls: '' },
+      { k: 'bytes', v: srcLen + ' \u2192 ' + dstLen, cls: '' }
+    ];
+    if (s.require) items.splice(5, 0, { k: 'require', v: s.require, cls: 'warn' });
+    box.innerHTML = items.map(function(it, i){
+      return '<div class="stat" style="animation-delay:' + (i * 30) + 'ms"><div class="k">' + it.k +
+        '</div><div class="v' + (it.cls ? ' ' + it.cls : '') + '">' + it.v + '</div></div>';
+    }).join('');
+  }
+
+  document.getElementById('go').addEventListener('click', function () {
+    var goBtn = this;
+    var errBox = document.getElementById('err');
+    var dst = document.getElementById('dst');
+    errBox.textContent = '';
+    dst.classList.remove('revealing');
+    goBtn.classList.add('working');
+
+    setTimeout(function(){
+      try {
+        var seed = parseInt(document.getElementById('seed').value, 10) || 0;
+        var srcVal = document.getElementById('src').value;
+        var res = gngObfuscate(srcVal, seed, {
+          rename: document.getElementById('optRename').checked,
+          strings: document.getElementById('optStrings').checked,
+          numbers: document.getElementById('optNumbers').checked,
+          antiDebug: document.getElementById('optAntiDebug').checked,
+          place: parseInt(document.getElementById('optPlace').value, 10) || 0,
+          user: parseInt(document.getElementById('optUser').value, 10) || 0,
+          decoys: parseInt(document.getElementById('optDecoys').value, 10) || 0,
+          require: (document.getElementById('optRequire').value || '').replace(/^\s+|\s+$/g, '')
+        });
+        dst.value = res.code;
+        updateCounts();
+        dst.classList.add('revealing');
+        renderStats(res.stats, srcVal.length, res.code.length);
+      } catch (e) {
+        errBox.textContent = 'FAILED: ' + (e && e.message ? e.message : e);
+      }
+      goBtn.classList.remove('working');
+    }, 260);
+  });
+
+  document.getElementById('copy').addEventListener('click', function () {
+    var t = document.getElementById('dst');
+    t.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    var flag = document.getElementById('copiedFlag');
+    flag.textContent = 'copied to clipboard';
+    setTimeout(function(){ flag.textContent = ''; }, 1600);
+  });
+  document.getElementById('dl').addEventListener('click', function () {
+    var blob = new Blob([document.getElementById('dst').value], {type: 'text/plain'});
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'obfuscated.txt';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+  });
 </script>
 </body>
 </html>
