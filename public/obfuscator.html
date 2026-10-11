@@ -359,6 +359,7 @@
         <input type="file" id="file" accept=".txt,.lua,.luau">
       </div>
       <div class="field"><span class="field-label">seed</span><input type="number" id="seed" value="7" class="seed-in"></div>
+      <label class="switch"><input type="checkbox" id="optFresh" checked><span class="track"></span>fresh seed each run</label>
       <label class="switch"><input type="checkbox" id="optRename" checked><span class="track"></span>rename locals</label>
       <label class="switch"><input type="checkbox" id="optStrings" checked><span class="track"></span>encrypt strings</label>
       <label class="switch"><input type="checkbox" id="optNumbers" checked><span class="track"></span>mangle numbers</label>
@@ -372,8 +373,10 @@
     </div>
     <div class="row">
       <div class="field"><span class="field-label">bootstrap&nbsp;hex</span><input type="text" id="optBoot" value="" placeholder="vault bootstrap, blank = off" class="req-in"></div>
+      <div class="field"><button type="button" class="file-btn" id="genBoot">generate</button></div>
+      <label class="switch"><input type="checkbox" id="optRemember" checked><span class="track"></span>remember settings in this browser</label>
       <div class="field"><span class="field-label">vault&nbsp;url</span><input type="text" id="optVault" value="https://connections-234z.onrender.com" placeholder="bot base url" class="req-in"></div>
-      <div class="field"><span class="field-label">script&nbsp;id</span><input type="text" id="optScript" value="" placeholder="e.g. Loader, blank = shared key" class="req-in"></div>
+      <div class="field"><span class="field-label">script&nbsp;id</span><input type="text" id="optScript" value="" placeholder="free text, blank = shared key" class="req-in"></div>
     </div>
     <div class="hint">Binding: output only decrypts in the live game &mdash; it halts in sandboxes and needs a spawned character. Clear <code>placeId</code> for legacy output.</div>
   </div>
@@ -470,6 +473,86 @@
     }).join('');
   }
 
+  var SET_KEY = 'gng.settings.v1';
+  function readSettings() {
+    var out = {};
+    var ids = ['seed', 'optPlace', 'optUser', 'optDecoys', 'optRequire',
+      'optBoot', 'optVault', 'optScript'];
+    var i, el;
+    for (i = 0; i < ids.length; i++) {
+      el = document.getElementById(ids[i]);
+      if (el) out[ids[i]] = el.value;
+    }
+    var checks = ['optRename', 'optStrings', 'optNumbers', 'optAntiDebug',
+      'optFresh', 'optRemember'];
+    for (i = 0; i < checks.length; i++) {
+      el = document.getElementById(checks[i]);
+      if (el) out[checks[i]] = el.checked ? 1 : 0;
+    }
+    return out;
+  }
+  function saveSettings() {
+    try {
+      var s = readSettings();
+      if (!s.optRemember) {
+        s.optBoot = '';
+        try { localStorage.removeItem(SET_KEY + '.boot'); } catch (e) {}
+      }
+      localStorage.setItem(SET_KEY, JSON.stringify(s));
+      if (s.optRemember && s.optBoot) {
+        try { localStorage.setItem(SET_KEY + '.boot', s.optBoot); } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  function restoreSettings() {
+    var s = null;
+    try { s = JSON.parse(localStorage.getItem(SET_KEY) || 'null'); } catch (e) {}
+    if (!s || typeof s !== 'object') return;
+    var k, el;
+    for (k in s) {
+      if (k === 'optBoot') continue;
+      el = document.getElementById(k);
+      if (!el) continue;
+      if (el.type === 'checkbox') el.checked = (s[k] === 1);
+      else if (typeof s[k] === 'string') el.value = s[k];
+    }
+    var remember = s.optRemember === 1;
+    var rEl = document.getElementById('optRemember');
+    if (rEl) rEl.checked = remember;
+    if (remember) {
+      try {
+        var b = localStorage.getItem(SET_KEY + '.boot');
+        if (b) document.getElementById('optBoot').value = b;
+      } catch (e) {}
+    }
+  }
+  restoreSettings();
+  document.getElementById('optRemember').addEventListener('change', function () {
+    if (!this.checked) {
+      try { localStorage.removeItem(SET_KEY + '.boot'); } catch (e) {}
+      document.getElementById('optBoot').value = '';
+    }
+    saveSettings();
+  });
+
+  document.getElementById('genBoot').addEventListener('click', function () {
+    try {
+      var buf = new Uint8Array(32);
+      var cryptoObj = window.crypto || window.msCrypto;
+      if (!cryptoObj || !cryptoObj.getRandomValues) throw new Error('no CSPRNG');
+      cryptoObj.getRandomValues(buf);
+      var hx = '', i;
+      for (i = 0; i < buf.length; i++) {
+        hx += (buf[i] < 16 ? '0' : '') + buf[i].toString(16);
+      }
+      document.getElementById('optBoot').value = hx;
+      saveSettings();
+    } catch (e) {
+      var errBox = document.getElementById('err');
+      errBox.textContent = 'Generate failed in this browser — use PowerShell instead.';
+    }
+  });
+
   document.getElementById('go').addEventListener('click', function () {
     var goBtn = this;
     var errBox = document.getElementById('err');
@@ -480,7 +563,11 @@
 
     setTimeout(function(){
       try {
-        var seed = parseInt(document.getElementById('seed').value, 10) || 0;
+        var seedEl = document.getElementById('seed');
+        if (document.getElementById('optFresh').checked) {
+          seedEl.value = 1 + Math.floor(Math.random() * 2147483646);
+        }
+        var seed = parseInt(seedEl.value, 10) || 0;
         var srcVal = document.getElementById('src').value;
         var res = gngObfuscate(srcVal, seed, {
           rename: document.getElementById('optRename').checked,
@@ -499,6 +586,7 @@
         updateCounts();
         dst.classList.add('revealing');
         renderStats(res.stats, srcVal.length, res.code.length);
+        saveSettings();
       } catch (e) {
         errBox.textContent = 'FAILED: ' + (e && e.message ? e.message : e);
       }
