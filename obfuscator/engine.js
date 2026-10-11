@@ -60,8 +60,11 @@ function gngObfuscate(src, seed, opts) {
   var SALT = bound ? ((bindPlace % 251) + (bindUser > 0 ? ((bindUser * 13) % 251) : 0)) % 256 : 0;
   var REQPATH = (typeof opts.require === 'string') ? opts.require : '';
   if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(REQPATH)) REQPATH = '';
-  var BOOT = (typeof opts.bootstrap === 'string') ? opts.bootstrap : '';
-  if (!/^[0-9a-fA-F]{32,128}$/.test(BOOT)) BOOT = '';
+  var BOOTRAW = (typeof opts.bootstrap === 'string') ? opts.bootstrap : '';
+  var BOOT = BOOTRAW;
+  if (BOOT !== '' && !/^[0-9a-fA-F]{32,128}$/.test(BOOT)) {
+    throw new Error('gng: bootstrap must be 32-128 hex characters (use Generate)');
+  }
   var VBASE = (typeof opts.vault === 'string') ? opts.vault : '';
   if (!/^https?:\/\/[A-Za-z0-9_.-]+(:\d+)?(\/[A-Za-z0-9_.\-/]*)?$/.test(VBASE)) VBASE = '';
   if (BOOT !== '' && VBASE === '') BOOT = '';
