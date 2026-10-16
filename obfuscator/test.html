@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GNG Obfuscator Test</title>
+</head>
+<body>
+    <h1>GNG Obfuscator Test</h1>
+    <textarea id="source" rows="10" cols="80">
+local function foo(x)
+    local y = x + 1
+    return y * 2
+end
+
+print(foo(5))
+    </textarea>
+    <br>
+    <button onclick="testObfuscate()">Obfuscate</button>
+    <br>
+    <textarea id="output" rows="20" cols="80"></textarea>
+
+    <script type="module">
+        import gngObfuscate from './modules/index.js';
+        window.gngObfuscate = gngObfuscate;
+    </script>
+    <script>
+        async function testObfuscate() {
+            const source = document.getElementById('source').value;
+            const output = document.getElementById('output');
+
+            try {
+                const result = await window.gngObfuscate(source, 7, {
+                    rename: true,
+                    strings: true,
+                    numbers: true
+                });
+                output.value = result.code;
+                console.log('Stats:', result.stats);
+            } catch (e) {
+                output.value = 'Error: ' + e.message;
+                console.error(e);
+            }
+        }
+    </script>
+</body>
+</html>
