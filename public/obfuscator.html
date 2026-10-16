@@ -561,7 +561,7 @@
     dst.classList.remove('revealing');
     goBtn.classList.add('working');
 
-    setTimeout(function(){
+    setTimeout(async function(){
       try {
         var seedEl = document.getElementById('seed');
         if (document.getElementById('optFresh').checked) {
@@ -569,7 +569,7 @@
         }
         var seed = parseInt(seedEl.value, 10) || 0;
         var srcVal = document.getElementById('src').value;
-        var res = gngObfuscate(srcVal, seed, {
+        var res = await gngObfuscate(srcVal, seed, {
           rename: document.getElementById('optRename').checked,
           strings: document.getElementById('optStrings').checked,
           numbers: document.getElementById('optNumbers').checked,
