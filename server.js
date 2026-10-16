@@ -9,17 +9,65 @@ app.use(express.json()); // Parse JSON request bodies
 app.get('/', (req, res) => res.send('Discord Bot Running'));
 
 // GNG obfuscator page (static UI + shared engine, same deploy)
-app.get('/obfuscator', (req, res) =>
-    res.sendFile(path.join(__dirname, 'public', 'obfuscator.html')));
+// NOTE: /modules/*.js must be served as application/javascript or the
+// browser refuses the dynamic import() with
+// "Failed to fetch dynamically imported module".
+const JS_MIME = 'application/javascript; charset=utf-8';
+function sendJs(res, absPath) {
+    res.type('.js');
+    res.setHeader('Content-Type', JS_MIME);
+    res.sendFile(absPath, (err) => {
+        if (err && !res.headersSent) {
+            console.error('[static] send failed:', absPath, err.message);
+            res.status(err.status || 404).send('Not found');
+        }
+    });
+}
+app.get(['/obfuscator', '/obfuscator/'], (req, res) =>
+    res.sendFile(path.join(__dirname, 'public', 'obfuscator.html'), (err) => {
+        if (err && !res.headersSent) {
+            console.error('[static] obfuscator.html missing:', err.message);
+            res.status(404).send('obfuscator.html not found on server');
+        }
+    }));
 app.get('/engine.js', (req, res) =>
-    res.sendFile(path.join(__dirname, 'obfuscator', 'engine.js')));
+    sendJs(res, path.join(__dirname, 'obfuscator', 'engine.js')));
+app.get('/modules/:file', (req, res) => {
+    const f = String(req.params.file || '');
+    // Only allow plain .js filenames — no dirs, no traversal.
+    if (!/^[A-Za-z0-9_.-]+\.js$/.test(f)) {
+        return res.status(400).send('Bad module name');
+    }
+    sendJs(res, path.join(__dirname, 'obfuscator', 'modules', f));
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
+// Never let Discord / misc async errors take Express down (would 503 every
+// route, including /modules/*.js which the obfuscator dynamic-imports).
+process.on('unhandledRejection', (err) => {
+    console.error('[process] unhandledRejection (kept alive):', err && err.message ? err.message : err);
+});
+process.on('uncaughtException', (err) => {
+    console.error('[process] uncaughtException (kept alive):', err && err.message ? err.message : err);
+});
+
 // Keep-alive: ping server every 25 seconds to prevent cold starts
-setInterval(() => {
-    fetch(`http://localhost:${PORT}`).catch(err => console.error('Keep-alive ping failed:', err));
-}, 25000);
+// (guarded: Node 16 has no global fetch — a bare fetch() would throw
+// synchronously and could crash the process on old runtimes).
+const HAS_FETCH = typeof fetch !== 'undefined';
+if (HAS_FETCH) {
+    setInterval(() => {
+        try {
+            Promise.resolve(fetch(`http://localhost:${PORT}`)).catch(err =>
+                console.error('Keep-alive ping failed:', err && err.message ? err.message : err));
+        } catch (err) {
+            console.error('Keep-alive ping failed:', err && err.message ? err.message : err);
+        }
+    }, 25000);
+} else {
+    console.warn('[server] global fetch unavailable (Node <18) — keep-alive ping disabled');
+}
 
 // Discord Bot Setup
 const client = new Client({
@@ -158,6 +206,7 @@ function fnv64hex(str) {
 let auditPasteId = process.env.VAULT_AUDIT_PASTE || '';
 async function pastefyReq(method, p, body) {
     if (!PASTEFY_API_KEY) return null;
+    if (typeof fetch === 'undefined') return null; // Node <18: audit disabled
     try {
         const r = await fetch(PASTEFY_API + p, {
             method,
@@ -286,4 +335,10 @@ app.post('/vault/fetch', (req, res) => {
     res.json({ ok: true, value: VAULT_SECRETS[key] });
 });
 
-client.login(BOT_TOKEN);
+if (!BOT_TOKEN) {
+    console.warn('[discord] BOT_TOKEN missing — bot login skipped, web endpoints still live');
+} else {
+    client.on('error', (e) => console.error('[discord] client error (kept alive):', e && e.message ? e.message : e));
+    Promise.resolve(client.login(BOT_TOKEN)).catch((e) =>
+        console.error('[discord] login failed (web endpoints still live):', e && e.message ? e.message : e));
+}
