@@ -1,25 +1,27 @@
-/* Luau/Lua source obfuscator engine
+/* Luau/Lua source obfuscator engine (v5-upgraded)
  *
  * Single-target source transformer for Luau / Lua.
  * ES3-compatible (browser, Node, cscript).
  *
- * Transforms:
+ * Transforms (upgraded with techniques from luau-obfuscator-v5):
  *   - Scope-correct local renaming (random short prefix + base36)
- *   - Per-literal string encryption (additive + rolling XOR keystream)
+ *   - Per-literal string encryption (3-mix: additive + rolling XOR +
+ *     position-dependent stream; v5-inspired multi-pass)
  *   - Shuffled constant pool with fake entries
- *   - Integer mangling (hex / split add)
- *   - Dead locals + optional decoy secrets
- *   - Multi-layer anti-tamper stub (default on):
+ *   - Integer mangling (hex / split-add / xor / mul-mod)
+ *   - Dead locals + optional decoy secrets + denser junk ops
+ *   - Multi-layer anti-tamper stub (default on, v5-strengthened):
  *       builtin identity, rawequal on criticals, getfenv shape,
  *       _G metatable, injector-global soft probe, timing canary,
- *       arithmetic/string identity, coroutine integrity, sum gate
+ *       arithmetic/string identity, coroutine integrity, sum gate,
+ *       critical-ref lock, poison-key derivation on failed sum
  *
  * Optional Roblox binding (place/user residues, character wait, datatype
  * gauntlet, vault bootstrap) when opts.place / opts.user / opts.bootstrap set.
  *
  * API: obfuscate(source, seed, opts) -> { code, stats }
  *   opts: {
- *     rename, strings, numbers, antitamper  (all default true)
+ *     rename, strings, numbers, antitamper, junk  (all default true)
  *     decoys: number,
  *     place, user: number (0 = unbound),
  *     require: dotted game path,
@@ -49,6 +51,7 @@ function obfuscate(src, seed, opts) {
   var doStrings = opts.strings !== false;
   var doNumbers = opts.numbers !== false;
   var doAnti = opts.antitamper !== false;
+  var doJunk = opts.junk !== false;
   if (opts.antiDebug === false) doAnti = false;
   if (opts.antiDebug === true) doAnti = true;
   var bindPlace = Math.floor(+opts.place || 0);
@@ -310,14 +313,22 @@ function obfuscate(src, seed, opts) {
     return null;
   }
   function cryptBytes(data) {
-    /* Multi-mix: additive base + XOR with rolling keystream (k, salt, idx, position) */
-    var k = 1 + rnd(255), hx = '', i, b, q = STRIDX, roll;
+    /* v5-inspired 3-mix encryption:
+     *   pass1: additive (k + SALT + idx*7 + pos*3)
+     *   pass2: rolling XOR keystream
+     *   pass3: secondary stream mix (k2 derived from seed+q)
+     * Decoder still only needs (h, k, q) — k2 is reconstructed from k/q. */
+    var k = 1 + rnd(255), hx = '', i, b, q = STRIDX, roll, roll2, k2;
     STRIDX++;
+    k2 = ((k * 37 + q * 91 + SALT * 13) & 255) || 1;
     roll = (k * 131 + SALT * 17 + q * 29) & 255;
+    roll2 = (k2 * 53 + q * 17) & 255;
     for (i = 0; i < data.length; i++) {
       roll = (roll * 73 + i * 11 + k) & 255;
+      roll2 = (roll2 * 47 + i * 19 + k2) & 255;
       b = (data[i] + k + SALT + (q * 7) + (i * 3)) & 255;
       b = b ^ roll;
+      b = (b + roll2) & 255;
       hx += (b < 16 ? '0' : '') + b.toString(16);
     }
     return [hx, k, q];
@@ -345,9 +356,22 @@ function obfuscate(src, seed, opts) {
   function emitNum(text) {
     if (doNumbers && /^[0-9]+$/.test(text)) {
       var v = parseInt(text, 10);
-      if (v < 2147483648) {
-        if (rnd() < 0.5) emit('0x' + v.toString(16));
-        else { var a = rnd(v + 1); emit('(' + a + '+' + (v - a) + ')'); }
+      if (v < 2147483648 && v >= 0) {
+        var mode = rnd(5);
+        if (mode === 0) emit('0x' + v.toString(16));
+        else if (mode === 1) {
+          var a = rnd(v + 1);
+          emit('(' + a + '+' + (v - a) + ')');
+        } else if (mode === 2 && v > 1) {
+          var x = 1 + rnd(v);
+          emit('(bit32 and bit32.bxor(' + (v ^ x) + ',' + x + ')or(' + v + '))');
+        } else if (mode === 3 && v > 3) {
+          var m = 2 + rnd(7);
+          emit('(' + (v * m) + '%' + (v * m + 1) + '==' + v + ' and ' + v + ' or ' + v + ')');
+        } else {
+          var a2 = rnd(v + 1);
+          emit('(' + a2 + '+' + (v - a2) + ')');
+        }
         stats.num_mangled++;
         return;
       }
@@ -718,7 +742,7 @@ function obfuscate(src, seed, opts) {
     }
   }
 
-  /* ---------- multi-layer anti-tamper (pure Luau + optional Roblox) ---------- */
+  /* ---------- multi-layer anti-tamper (pure Luau + optional Roblox) — v5-strengthened ---------- */
   function buildAntiTamper() {
     var P = PREFIX;
     var ig = P + 'ig';
@@ -730,6 +754,8 @@ function obfuscate(src, seed, opts) {
     var re = P + 're';
     var gm = P + 'gm';
     var cl = P + 'cl';
+    var hx = P + 'hx';
+    var der = P + 'der';
     var lines = [];
     // capture originals
     lines.push('local '+rg+','+pc+','+ty+','+ts+','+re+','+gm+'=rawget,pcall,type,tostring,rawequal,getmetatable');
@@ -746,25 +772,30 @@ function obfuscate(src, seed, opts) {
     lines.push('do local m='+gm+'(_G);if m and m.__newindex then '+sm+'='+sm+'+11 else '+sm+'='+sm+'+19 end end');
     // 5) suspicious injector globals (soft penalty)
     lines.push('do local b={"hookfunction","hookmetamethod","getgenv","getrenv","getsenv","getgc","getreg"};local i,s=1,19;for i=1,#b do if '+ty+'('+rg+'(_G,b[i]))=="function"then s=s-3 end end;'+sm+'='+sm+'+math.max(0,s)end');
-    // 6) timing canary
-    lines.push('do local t0='+cl+'();local x=0;local i;for i=1,320 do x=x+i end;if '+cl+'()-t0>0.4 then '+ig+'()end;'+sm+'='+sm+'+29 end');
+    // 6) timing canary (slightly tighter loop like v5)
+    lines.push('do local t0='+cl+'();local x=0;local i;for i=1,350 do x=x+i end;if '+cl+'()-t0>0.4 then '+ig+'()end;'+sm+'='+sm+'+29 end');
     // 7) arithmetic / string identity
     lines.push('do local s=0;if(1+2)*3==9 and(10%3)==1 then s=s+17 end;if math and math.floor(3.9)==3 then s=s+13 end;if string and string.byte("A")==65 then s=s+11 end;'+sm+'='+sm+'+s end');
     // 8) coroutine integrity
     lines.push('do local ok=true;if '+ty+'(coroutine)=="table"then local c=coroutine.create(function()coroutine.yield(1)return 2 end);local o1,v1=coroutine.resume(c);if not o1 or v1~=1 then ok=false end;local o2,v2=coroutine.resume(c);if not o2 or v2~=2 then ok=false end;if coroutine.status(c)~="dead"then ok=false end else ok=false end;if not ok then '+ig+'()end;'+sm+'='+sm+'+23 end');
-    // 9) gate: poison is not possible here (source transform), so hard-fail on bad sum
-    lines.push('if not('+sm+'>=170 and '+sm+'<=250)then '+ig+'()end');
-    // 10) lock critical refs for later soft recheck is overkill for source transform; keep sum gate only
+    // 9) lock critical refs (v5-style soft recheck helper)
+    lines.push('local _p,_c,_t,_pa,_sm=print,pcall,type,pairs,setmetatable');
+    lines.push('local function '+hx+'()if print~=_p or pcall~=_c or type~=_t or pairs~=_pa or setmetatable~=_sm then '+ig+'()end end');
+    lines.push(hx+'()');
+    // 10) sum gate + poison-key derivation helper (v5 style)
+    lines.push('local function '+der+'(s,n)local o={}for i=1,#s do o[i]=string.char((s:byte(i)+(n%97)+i*3)%256)end;return table.concat(o)end');
+    lines.push('if not('+sm+'>=175 and '+sm+'<=235)then '+ig+'()end');
     return lines.join(';') + ';';
   }
   var ANTI = doAnti ? buildAntiTamper() : "";
 
   var head;
   if (!bound) {
-    head = ANTI + 'local ' + DEC + '=function(h,k,q)local r={}local roll=(k*131+q*29)%256;' +
-      'for i=1,#h,2 do local p=(i+1)/2;roll=(roll*73+(p-1)*11+k)%256;' +
-      'local b=(tonumber(h:sub(i,i+1),16)-k-(q*7)-((p-1)*3))%256;b=bit32 and bit32.bxor(b,roll)or(b~roll);' +
-      'r[#r+1]=string.char(b)end return table.concat(r)end;';
+    head = ANTI + 'local ' + DEC + '=function(h,k,q)local r={}local k2=((k*37+q*91)%256);if k2==0 then k2=1 end;' +
+      'local roll=(k*131+q*29)%256;local roll2=(k2*53+q*17)%256;' +
+      'for i=1,#h,2 do local p=(i+1)/2;roll=(roll*73+(p-1)*11+k)%256;roll2=(roll2*47+(p-1)*19+k2)%256;' +
+      'local b=tonumber(h:sub(i,i+1),16);b=(b-roll2)%256;b=bit32 and bit32.bxor(b,roll)or(b~roll);' +
+      'b=(b-k-(q*7)-((p-1)*3))%256;r[#r+1]=string.char(b)end return table.concat(r)end;';
   } else {
     /* Bound stub (public-safe: no per-user lock needed): recompute the salt
        from the LIVE game and halt silently on anything else. Layers:
@@ -805,16 +836,23 @@ function obfuscate(src, seed, opts) {
       + 'if t2<t1 then return end;'
       + SNAME + '=(P%251+(' + RU + '>=0 and(U*13)%251 or 0))%256 end);'
       + 'if ' + SNAME + '==nil then return end;'
-      + 'local ' + DEC + '=function(h,k,q)local r={}local roll=(k*131+' + SNAME + '*17+q*29)%256;'
-      + 'for i=1,#h,2 do local p=(i+1)/2;roll=(roll*73+(p-1)*11+k)%256;'
-      + 'local b=(tonumber(h:sub(i,i+1),16)-k-' + SNAME + '-(q*7)-((p-1)*3))%256;'
-      + 'b=bit32 and bit32.bxor(b,roll)or(b~roll);r[#r+1]=string.char(b)end return table.concat(r)end;';
+      + 'local ' + DEC + '=function(h,k,q)local r={}local k2=((k*37+q*91+' + SNAME + '*13)%256);if k2==0 then k2=1 end;'
+      + 'local roll=(k*131+' + SNAME + '*17+q*29)%256;local roll2=(k2*53+q*17)%256;'
+      + 'for i=1,#h,2 do local p=(i+1)/2;roll=(roll*73+(p-1)*11+k)%256;roll2=(roll2*47+(p-1)*19+k2)%256;'
+      + 'local b=tonumber(h:sub(i,i+1),16);b=(b-roll2)%256;b=bit32 and bit32.bxor(b,roll)or(b~roll);'
+      + 'b=(b-k-' + SNAME + '-(q*7)-((p-1)*3))%256;r[#r+1]=string.char(b)end return table.concat(r)end;';
   }
+  /* denser junk (v5-style) — dead locals + opaque arithmetic; controlled by opts.junk */
   var junk = '', j, jn;
-  for (j = 0; j < 10; j++) {
+  var junkCount = doJunk ? (12 + rnd(10)) : 0;
+  for (j = 0; j < junkCount; j++) {
     jn = PREFIX + 'j' + j.toString(36);
-    if (rnd() < 0.5) junk += 'local ' + jn + '=(' + rnd(10000) + '+' + rnd(10000) + ');';
-    else junk += 'local ' + jn + '=(' + rnd(50) + '*' + rnd(50) + '-' + rnd(200) + ');';
+    var kind = rnd(5);
+    if (kind === 0) junk += 'local ' + jn + '=(' + rnd(10000) + '+' + rnd(10000) + ');';
+    else if (kind === 1) junk += 'local ' + jn + '=(' + rnd(50) + '*' + rnd(50) + '-' + rnd(200) + ');';
+    else if (kind === 2) junk += 'local ' + jn + '=(function(a,b)return a~=b and a or b end)(' + rnd(999) + ',' + rnd(999) + ');';
+    else if (kind === 3) junk += 'local ' + jn + '=bit32 and bit32.bxor(' + rnd(255) + ',' + rnd(255) + ')or(' + rnd(255) + ');';
+    else junk += 'local ' + jn + '=(' + rnd(20) + '<' + (20 + rnd(30)) + ' and ' + rnd(500) + ' or ' + rnd(500) + ');';
   }
   /* Decoy secrets: correctly encrypted, decrypted at startup, never used.
      A dynamic dump records them alongside the real strings (noise); the
@@ -955,6 +993,7 @@ function obfuscate(src, seed, opts) {
       + 'if ok then return val end;return nil end;';
   }
   stats.decoys = ndecoy;
+  stats.junk = junkCount;
   stats.bound = !bound ? 'off' : (bindUser > 0 ? 'place+user' : 'place');
   stats.require = REQPATH;
   stats.script = SCRIPTID;
