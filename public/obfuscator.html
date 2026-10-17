@@ -9,34 +9,38 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:        #07080a;
-    --panel:     #0c0e11;
-    --panel-2:   #111419;
-    --well:      #090a0c;
-    --line:      #1d232a;
-    --line-lit:  #2c343d;
-    --text:      #dbe2e8;
-    --dim:       #65717c;
-    --dim-2:     #3c454e;
-    --accent:    #8d7bff;
-    --accent-ir: #b6a9ff;
-    --accent-dk: #231c4a;
-    --warn:      #ffb648;
-    --bad:       #ff5c6c;
-    --ok:        #51e0a6;
+    --bg:          #0a0b0e;
+    --bg-edge:     #060709;
+    --surface:     #111319;
+    --surface-2:   #161920;
+    --surface-3:   #1c2028;
+    --well:        #0d0e12;
+    --border:      #22262e;
+    --border-lit:  #323844;
+    --text:        #e7ebf0;
+    --dim:         #88919c;
+    --dim-2:       #4c525c;
+    --accent:      #8d7bff;
+    --accent-ir:   #b6a9ff;
+    --accent-ink:  #0b0714;
+    --warn:        #ffb648;
+    --bad:         #ff5c6c;
+    --ok:          #51e0a6;
     --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, Consolas, Menlo, monospace;
-    --radius: 3px;
+    --r-sm: 6px;
+    --r-md: 10px;
+    --r-lg: 14px;
   }
   [data-theme="mint"]{
-    --accent: #4fe3b8; --accent-ir: #8af2d4; --accent-dk: #0f3a2d; --warn: #ff8a5c;
+    --accent: #4fe3b8; --accent-ir: #93f3d8; --accent-ink: #061a14; --warn: #ff8a5c;
   }
   [data-theme="amber"]{
-    --accent: #ffb648; --accent-ir: #ffd28f; --accent-dk: #3a2a0e; --warn: #8d7bff;
+    --accent: #ffb648; --accent-ir: #ffd28f; --accent-ink: #1c1203; --warn: #8d7bff;
   }
 
   * { box-sizing: border-box; }
-  ::selection { background: var(--accent); color: #060608; }
+  ::selection { background: var(--accent); color: var(--accent-ink); }
 
   @keyframes sweep {
     from { transform: translateX(-120%); }
@@ -47,7 +51,7 @@
     50%      { opacity: .55; box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 0%, transparent); }
   }
   @keyframes rise-in {
-    from { opacity: 0; transform: translateY(5px); }
+    from { opacity: 0; transform: translateY(6px); }
     to   { opacity: 1; transform: translateY(0); }
   }
   @keyframes flicker-in {
@@ -57,6 +61,7 @@
     20%  { opacity: 1; }
     100% { opacity: 1; }
   }
+  @keyframes shimmer { from { background-position: 160% 0; } to { background-position: -60% 0; } }
   @media (prefers-reduced-motion: reduce) {
     * { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
   }
@@ -66,116 +71,224 @@
     color: var(--text);
     font-family: var(--font-mono);
     margin: 0;
-    padding: clamp(10px, 2.4vw, 28px);
+    padding: clamp(10px, 2.6vw, 32px);
     font-size: 13px;
+    line-height: 1.5;
     background:
-      radial-gradient(900px 420px at 15% -10%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
+      radial-gradient(900px 460px at 12% -12%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 60%),
       repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0px, rgba(255,255,255,.012) 1px, transparent 1px, transparent 3px),
       var(--bg);
   }
 
+  a { color: var(--accent-ir); }
+  svg.icon { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; vertical-align: -2px; }
+
   .shell {
-    max-width: 1080px;
+    max-width: 1280px;
     margin: 0 auto;
-    border: 1px solid var(--line);
-    background: var(--panel);
     position: relative;
-    overflow: hidden;
-    box-shadow: 0 30px 80px -40px rgba(0,0,0,.8);
-  }
-  .shell::before{
-    content:"";
-    position:absolute; left:0; top:0; height:2px; width:36%;
-    background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    animation: sweep 3.2s ease-in-out infinite;
-    opacity:.8;
   }
 
-  /* ---------- Titlebar ---------- */
-  .titlebar {
+  /* ---------- Topbar ---------- */
+  .topbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--line);
-    background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent);
+    padding: 4px 2px 18px;
   }
-  .brand { display:flex; align-items:center; gap:10px; }
+  .brand { display:flex; align-items:center; gap:11px; }
   .mark {
-    width: 26px; height: 26px; flex: none;
-    border: 1px solid var(--line-lit);
+    width: 32px; height: 32px; flex: none;
+    border: 1px solid var(--border-lit);
+    border-radius: var(--r-sm);
     display:flex; align-items:center; justify-content:center;
     position: relative;
     background: var(--well);
+    overflow: hidden;
+  }
+  .mark::before{
+    content:"";
+    position:absolute; inset:0;
+    background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, transparent), transparent 60%);
   }
   .mark::after{
-    content:""; width:8px; height:8px; background: var(--accent);
+    content:""; width:9px; height:9px; background: var(--accent);
     clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+    position: relative;
   }
   h1 {
     font-family: var(--font-display);
-    font-size: 16px;
+    font-size: 17px;
     font-weight: 700;
     letter-spacing: -0.01em;
     margin: 0;
     color: var(--text);
-    line-height: 1.1;
+    line-height: 1.15;
   }
-  h1 b { color: var(--accent); font-weight: 700; }
-  .sub {
+  h1 span { color: var(--accent-ir); }
+  .brand .sub {
     font-size: 11px;
     color: var(--dim);
     margin-top: 2px;
   }
 
-  .status {
-    display:flex; align-items:center; gap:14px;
-  }
-  .statline{
-    display:flex; align-items:center; gap:6px;
-    font-size: 10.5px; color: var(--dim);
+  .topbar-right { display:flex; align-items:center; gap: 16px; }
+  .net-badge {
+    display:flex; align-items:center; gap:7px;
+    font-size: 11px; color: var(--dim);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    padding: 6px 11px;
+    border-radius: 999px;
   }
   .dot {
     width:6px; height:6px; border-radius:50%;
-    background: var(--accent);
+    background: var(--ok);
     animation: pulse-dot 2.2s ease-in-out infinite;
   }
 
-  .themes { display:flex; gap:5px; border-left: 1px solid var(--line); padding-left: 14px; }
+  .themes { display:flex; gap:6px; border-left: 1px solid var(--border); padding-left: 16px; }
   .theme-sw {
-    width: 15px; height: 15px;
-    border: 1px solid var(--line-lit);
+    width: 17px; height: 17px;
+    border-radius: 50%;
+    border: 1px solid var(--border-lit);
     cursor: pointer;
     padding: 0;
     background: var(--swatch, var(--accent));
-    transition: transform .12s ease, border-color .12s ease;
+    transition: transform .14s ease, border-color .14s ease, box-shadow .14s ease;
   }
-  .theme-sw[data-active="true"] { border-color: var(--text); transform: scale(1.12); }
-  .theme-sw:hover { transform: scale(1.12); }
+  .theme-sw[data-active="true"] { border-color: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--swatch, var(--accent)) 25%, transparent); }
+  .theme-sw:hover { transform: scale(1.14); }
+  .theme-sw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  /* ---------- Controls ---------- */
-  .controls {
-    padding: 14px 20px;
-    border-bottom: 1px solid var(--line);
+  /* ---------- Hero ---------- */
+  .hero {
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    background: linear-gradient(165deg, var(--surface), var(--surface-2) 120%);
+    padding: 26px 28px;
+    margin-bottom: 18px;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before{
+    content:"";
+    position:absolute; left:0; top:0; height:2px; width:34%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: sweep 3.4s ease-in-out infinite;
+    opacity:.7;
+  }
+  .hero h2 {
+    font-family: var(--font-display);
+    font-size: clamp(20px, 2.6vw, 26px);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+    max-width: 640px;
+  }
+  .hero p {
+    margin: 0 0 18px;
+    color: var(--dim);
+    font-size: 12.5px;
+    max-width: 580px;
+    line-height: 1.65;
+  }
+  .hero-chips { display:flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display:flex; align-items:center; gap:7px;
+    font-size: 11px; color: var(--dim);
+    border: 1px solid var(--border);
+    background: var(--well);
+    padding: 7px 12px;
+    border-radius: var(--r-sm);
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+  .chip.ok b { color: var(--ok); }
+  .chip.bad b { color: var(--bad); }
+  .chip .dot-sm { width:5px; height:5px; border-radius:50%; background: var(--ok); flex: none; }
+  .chip.bad .dot-sm { background: var(--bad); }
+
+  /* ---------- Layout ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: 272px 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+  @media (max-width: 980px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  /* ---------- Sidebar / settings ---------- */
+  .sidebar {
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .sidebar-head {
+    padding: 14px 16px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  details.group { border-bottom: 1px solid var(--border); }
+  details.group:last-of-type { border-bottom: none; }
+  details.group > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 13px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text);
+    font-weight: 500;
+    user-select: none;
+    transition: background .12s ease;
+  }
+  details.group > summary::-webkit-details-marker { display: none; }
+  details.group > summary:hover { background: var(--surface-2); }
+  details.group > summary .chev {
+    color: var(--dim-2);
+    transition: transform .18s ease;
+    flex: none;
+  }
+  details.group[open] > summary .chev { transform: rotate(90deg); }
+  details.group > summary .gcount {
+    margin-left: auto;
+    margin-right: 4px;
+    font-size: 10px;
+    color: var(--dim-2);
+  }
+  .group-body {
+    padding: 4px 16px 16px;
     display: flex;
     flex-direction: column;
     gap: 12px;
   }
-  .row { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
-  .field { display: flex; align-items: center; gap: 7px; }
-  .field-label { font-size: 10.5px; color: var(--dim); }
+  .group-body .field-row { display: flex; flex-direction: column; gap: 6px; }
+  .group-body .field-row.inline { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
+  .field-label { font-size: 11px; color: var(--dim); display:flex; align-items:center; gap:6px; }
+  .field-hint { font-size: 10.5px; color: var(--dim-2); line-height: 1.5; }
+  .field-hint code { color: var(--dim); background: var(--well); padding: 1px 4px; border: 1px solid var(--border); border-radius: 3px; }
 
   .switch {
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: center; gap: 9px;
     font-size: 12px; color: var(--text);
     cursor: pointer; user-select: none;
   }
   .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
   .switch .track {
-    width: 28px; height: 15px;
-    border: 1px solid var(--line-lit);
+    width: 30px; height: 17px;
+    border: 1px solid var(--border-lit);
     background: var(--well);
+    border-radius: 999px;
     position: relative;
     flex: none;
     transition: border-color .15s ease, background .15s ease;
@@ -184,22 +297,24 @@
     content: "";
     position: absolute;
     top: 2px; left: 2px;
-    width: 9px; height: 9px;
+    width: 11px; height: 11px;
+    border-radius: 50%;
     background: var(--dim);
     transition: transform .18s cubic-bezier(.4,0,.2,1), background .15s ease;
   }
-  .switch input:checked + .track { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--well)); }
+  .switch input:checked + .track { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--well)); }
   .switch input:checked + .track::after { transform: translateX(13px); background: var(--accent); box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent); }
   .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   input[type=number], input[type=text] {
     background: var(--well);
     color: var(--text);
-    border: 1px solid var(--line-lit);
-    border-radius: var(--radius);
-    padding: 6px 8px;
+    border: 1px solid var(--border-lit);
+    border-radius: var(--r-sm);
+    padding: 8px 10px;
     font-family: var(--font-mono);
     font-size: 12px;
+    width: 100%;
     transition: border-color .15s ease, box-shadow .15s ease;
   }
   input[type=number]:focus, input[type=text]:focus {
@@ -209,56 +324,49 @@
   }
   input::placeholder { color: var(--dim-2); }
 
-  .file-field {
-    display: inline-flex; align-items: center;
-    border: 1px dashed var(--line-lit);
-    background: var(--well);
-    padding: 5px 5px 5px 10px;
-    gap: 8px;
-    border-radius: var(--radius);
-  }
-  .file-field span { font-size: 11px; color: var(--dim); }
-  input[type=file] { display: none; }
-  .file-btn { font-size: 11px; padding: 4px 9px; }
-
-  .seed-in { width: 64px; }
-  .id-in   { width: 108px; }
-  .decoy-in{ width: 48px; }
-  .req-in  { width: 300px; }
-
-  .hint { font-size: 11px; color: var(--dim); line-height: 1.6; }
-  .hint code { color: var(--dim); background: var(--well); padding: 1px 4px; border: 1px solid var(--line); border-radius: 2px; }
+  .boot-row { display: flex; gap: 8px; align-items: center; }
+  .boot-row input { flex: 1; min-width: 0; }
 
   /* ---------- Buttons ---------- */
   button {
-    background: var(--panel-2);
+    background: var(--surface-3);
     color: var(--text);
-    border: 1px solid var(--line-lit);
-    border-radius: var(--radius);
-    padding: 9px 16px;
+    border: 1px solid var(--border-lit);
+    border-radius: var(--r-sm);
+    padding: 9px 14px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 11.5px;
     letter-spacing: 0.01em;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
     transition: border-color .15s ease, color .15s ease, background .15s ease, transform .08s ease;
   }
   button:hover { border-color: var(--accent); color: var(--accent-ir); }
   button:active { transform: translateY(1px); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.icon-btn { padding: 7px 9px; }
+  button.block { width: 100%; justify-content: center; }
+  button.ghost { background: transparent; border-color: var(--border); color: var(--dim); }
+  button.ghost:hover { color: var(--accent-ir); border-color: var(--accent); }
 
   #go {
     position: relative;
     overflow: hidden;
     background: var(--accent);
     border-color: var(--accent);
-    color: #0a0614;
+    color: var(--accent-ink);
     font-weight: 700;
     font-family: var(--font-display);
-    padding: 10px 22px;
+    font-size: 13px;
+    padding: 12px 26px;
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent);
   }
-  #go:hover { color: #0a0614; border-color: var(--accent); filter: brightness(1.07); box-shadow: 0 0 22px -4px var(--accent); }
+  #go svg { stroke: var(--accent-ink); }
+  #go:hover { color: var(--accent-ink); border-color: var(--accent); filter: brightness(1.07); box-shadow: 0 0 26px -4px var(--accent); }
   #go.working { color: transparent; pointer-events: none; }
+  #go.working svg { opacity: 0; }
   #go.working::after {
     content: "";
     position: absolute; inset: 0;
@@ -266,83 +374,151 @@
     background-size: 220% 100%;
     animation: shimmer .7s linear infinite;
   }
-  @keyframes shimmer { from { background-position: 160% 0; } to { background-position: -60% 0; } }
   #go.working::before {
     content: "ENCRYPTING";
     position:absolute; inset:0;
     display:flex; align-items:center; justify-content:center;
-    color:#0a0614; font-size:11px; letter-spacing:.14em;
+    color: var(--accent-ink); font-size:11px; letter-spacing:.14em;
   }
 
-  /* ---------- IO ---------- */
+  /* ---------- Workspace ---------- */
+  .workspace { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
   .io-wrap {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 1px;
-    background: var(--line);
-    border-bottom: 1px solid var(--line);
+    gap: 14px;
   }
-  @media (max-width: 760px) { .io-wrap { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .io-wrap { grid-template-columns: 1fr; } }
 
-  .io { background: var(--panel); padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 8px; }
-  .io-label {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 10.5px; color: var(--dim); letter-spacing: .03em;
+  .io-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
   }
-  .io-label .count { color: var(--dim-2); }
+  .io-panel.out { border-color: color-mix(in srgb, var(--accent) 22%, var(--border)); }
+  .io-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .io-head .io-title { display:flex; align-items:center; gap: 8px; font-size: 11.5px; color: var(--text); font-weight: 500; }
+  .io-head .io-title .tag-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim-2); flex: none; }
+  .io-panel.out .io-head .tag-dot { background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent); }
+  .io-head .count { font-size: 10.5px; color: var(--dim-2); }
+  .io-head .spacer { flex: 1; }
+  .io-head .io-tools { display: flex; align-items: center; gap: 6px; }
+
+  .file-field {
+    display: inline-flex; align-items: center;
+    border: 1px dashed var(--border-lit);
+    background: var(--well);
+    padding: 4px 4px 4px 10px;
+    gap: 7px;
+    border-radius: var(--r-sm);
+    font-size: 11px;
+  }
+  .file-field span { color: var(--dim); max-width: 108px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  input[type=file] { display: none; }
 
   textarea {
     width: 100%; box-sizing: border-box;
     background: var(--well);
     color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
+    border: none;
     font-family: var(--font-mono);
-    font-size: 12px;
-    padding: 10px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    padding: 14px;
     resize: vertical;
-    transition: border-color .15s ease;
+    flex: 1;
   }
-  textarea:focus { outline: none; border-color: var(--line-lit); }
-  #src { height: 30vh; }
-  #dst { height: 30vh; color: var(--accent-ir); }
+  textarea:focus { outline: none; }
+  #src { height: 32vh; min-height: 220px; }
+  #dst { height: 32vh; min-height: 220px; color: var(--accent-ir); }
   #dst.revealing { animation: flicker-in .5s steps(6, end); }
 
-  /* ---------- Actions / err / stats ---------- */
-  .actions { padding: 14px 20px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--line); }
-  .actions .spacer { flex: 1; }
-  .actions .ghost-hint { font-size: 10.5px; color: var(--dim-2); }
+  .io-panel.is-full {
+    position: fixed;
+    inset: clamp(8px, 2vw, 28px);
+    z-index: 60;
+    box-shadow: 0 40px 100px -30px rgba(0,0,0,.75);
+  }
+  .io-panel.is-full textarea { height: 100% !important; }
+  .io-backdrop {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(5,5,7,.72);
+    backdrop-filter: blur(2px);
+    z-index: 55;
+  }
+  .io-backdrop.show { display: block; }
 
+  /* ---------- Actions / err / stats ---------- */
+  .actions-bar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .actions-bar .ghost-hint { font-size: 10.5px; color: var(--ok); min-width: 1px; }
+  .actions-bar .hint-static { font-size: 10.5px; color: var(--dim-2); margin-left: auto; }
+
+  #err:empty { display: none; }
   #err {
+    display: flex; align-items: flex-start; gap: 9px;
     color: var(--bad);
     font-size: 12px;
     white-space: pre-wrap;
-    padding: 0 20px;
+    padding: 13px 16px;
+    border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--border));
+    background: color-mix(in srgb, var(--bad) 8%, var(--surface));
+    border-radius: var(--r-md);
   }
-  #err:not(:empty) { padding: 12px 20px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bad) 7%, transparent); }
+  #err::before { content: "!"; flex: none; width: 16px; height: 16px; border-radius: 50%; background: var(--bad); color: #1a0506; font-weight: 700; font-size: 11px; display:flex; align-items:center; justify-content:center; font-family: var(--font-display); }
 
-  .stats { display: flex; flex-wrap: wrap; gap: 1px; background: var(--line); }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    overflow: hidden;
+  }
   .stats:empty { display: none; }
-  .stat { background: var(--panel); padding: 10px 16px; min-width: 108px; flex: 1; animation: rise-in .25s ease both; }
-  .stat .k { font-size: 9.5px; color: var(--dim); letter-spacing: .04em; }
-  .stat .v { font-family: var(--font-display); font-size: 16px; font-weight: 600; color: var(--text); margin-top: 2px; }
+  .stat { background: var(--surface); padding: 12px 16px; animation: rise-in .25s ease both; }
+  .stat .k { font-size: 10px; color: var(--dim); }
+  .stat .v { font-family: var(--font-display); font-size: 17px; font-weight: 600; color: var(--text); margin-top: 3px; }
   .stat .v.accent { color: var(--accent-ir); }
   .stat .v.warn { color: var(--warn); }
+
+  footer.page-foot {
+    margin-top: 22px;
+    padding: 16px 2px 4px;
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+    font-size: 10.5px; color: var(--dim-2);
+    border-top: 1px solid var(--border);
+  }
+  footer.page-foot a { color: var(--dim); text-decoration: none; }
+  footer.page-foot a:hover { color: var(--accent-ir); }
 </style>
 </head>
 <body>
 <div class="shell" data-theme="violet">
 
-  <div class="titlebar">
+  <div class="topbar">
     <div class="brand">
       <div class="mark"></div>
       <div>
-        <h1>Luau <b>Obfuscator</b></h1>
-        <div class="sub">Lua / Luau &middot; runs fully in your browser, nothing leaves this tab</div>
+        <h1>Luau <span>Obfuscator</span></h1>
+        <div class="sub">Lua / Luau toolkit</div>
       </div>
     </div>
-    <div class="status">
-      <div class="statline"><span class="dot"></span> local, no network</div>
+    <div class="topbar-right">
+      <div class="net-badge"><span class="dot"></span> runs locally in this tab</div>
       <div class="themes" id="themes">
         <button class="theme-sw" style="--swatch:#8d7bff" data-theme="violet" data-active="true" title="Violet" aria-label="Violet theme"></button>
         <button class="theme-sw" style="--swatch:#4fe3b8" data-theme="mint" title="Mint" aria-label="Mint theme"></button>
@@ -351,60 +527,201 @@
     </div>
   </div>
 
-  <div class="controls">
-    <div class="row">
-      <div class="file-field">
-        <span id="fileName">no file chosen</span>
-        <button type="button" class="file-btn" id="fileBtn">choose file</button>
-        <input type="file" id="file" accept=".txt,.lua,.luau">
+  <div class="hero">
+    <h2>Protect your Luau source before it ships.</h2>
+    <p>Rename locals, encrypt strings, mangle numbers, and bind a build to a place. Everything below runs in your browser — nothing is uploaded.</p>
+    <div class="hero-chips">
+      <div class="chip" id="engineChip"><span class="dot-sm"></span> engine <b id="engineChipState">checking&hellip;</b></div>
+      <div class="chip">source <b id="chipSrcBytes">0 B</b></div>
+      <div class="chip">output <b id="chipDstBytes">0 B</b></div>
+      <div class="chip">last run <b id="chipLastRun">&mdash;</b></div>
+    </div>
+  </div>
+
+  <div class="layout">
+
+    <aside class="sidebar">
+      <div class="sidebar-head">Configuration</div>
+
+      <details class="group" open>
+        <summary>General
+          <svg class="icon chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+        </summary>
+        <div class="group-body">
+          <div class="field-row">
+            <span class="field-label">Seed</span>
+            <input type="number" id="seed" value="7">
+          </div>
+          <label class="switch"><input type="checkbox" id="optFresh" checked><span class="track"></span>Fresh seed each run</label>
+          <div class="field-hint">A new random seed is generated every time you obfuscate. Turn off to reuse the seed above.</div>
+        </div>
+      </details>
+
+      <details class="group" open>
+        <summary>Obfuscation
+          <svg class="icon chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+        </summary>
+        <div class="group-body">
+          <label class="switch"><input type="checkbox" id="optRename" checked><span class="track"></span>Rename locals</label>
+          <label class="switch"><input type="checkbox" id="optStrings" checked><span class="track"></span>Encrypt strings</label>
+          <label class="switch"><input type="checkbox" id="optNumbers" checked><span class="track"></span>Mangle numbers</label>
+        </div>
+      </details>
+
+      <details class="group" open>
+        <summary>Protection
+          <svg class="icon chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+        </summary>
+        <div class="group-body">
+          <label class="switch"><input type="checkbox" id="optAntiDebug" checked><span class="track"></span>Anti-tamper</label>
+          <div class="field-row">
+            <span class="field-label">Decoys</span>
+            <input type="number" id="optDecoys" value="6">
+          </div>
+          <div class="field-hint">Decoys pad the output with fake, non-executing branches to confuse static analysis.</div>
+        </div>
+      </details>
+
+      <details class="group">
+        <summary>Roblox binding
+          <svg class="icon chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+        </summary>
+        <div class="group-body">
+          <div class="field-row">
+            <span class="field-label">Place ID</span>
+            <input type="number" id="optPlace" value="0">
+          </div>
+          <div class="field-row">
+            <span class="field-label">User ID <span style="color:var(--dim-2)">(optional)</span></span>
+            <input type="number" id="optUser" value="" placeholder="blank = off">
+          </div>
+          <div class="field-hint">Set a place ID (and optional user ID) to lock the output to that Roblox place. Leave both blank/0 for pure Luau or third-party use.</div>
+        </div>
+      </details>
+
+      <details class="group">
+        <summary>Dependencies
+          <svg class="icon chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+        </summary>
+        <div class="group-body">
+          <div class="field-row">
+            <span class="field-label">Require path</span>
+            <input type="text" id="optRequire" value="" placeholder="e.g. ReplicatedStorage.Modules.ProfileData">
+          </div>
+        </div>
+      </details>
+
+      <details class="group">
+        <summary>Bootstrap &amp; vault
+          <svg class="icon chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+        </summary>
+        <div class="group-body">
+          <div class="field-row">
+            <span class="field-label">Bootstrap hex</span>
+            <div class="boot-row">
+              <input type="text" id="optBoot" value="" placeholder="vault bootstrap, blank = off">
+              <button type="button" class="icon-btn" id="genBoot" title="Generate a random bootstrap value" aria-label="Generate bootstrap hex">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="field-row">
+            <span class="field-label">Vault URL</span>
+            <input type="text" id="optVault" value="https://connections-234z.onrender.com" placeholder="bot base url">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Script ID</span>
+            <input type="text" id="optScript" value="" placeholder="free text, blank = shared key">
+          </div>
+        </div>
+      </details>
+
+      <details class="group">
+        <summary>Preferences
+          <svg class="icon chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+        </summary>
+        <div class="group-body">
+          <label class="switch"><input type="checkbox" id="optRemember" checked><span class="track"></span>Remember settings in this browser</label>
+          <div class="field-hint">Appearance can be changed any time with the theme dots in the top-right corner.</div>
+        </div>
+      </details>
+    </aside>
+
+    <section class="workspace">
+
+      <div class="io-wrap">
+        <div class="io-panel" id="srcPanel">
+          <div class="io-head">
+            <div class="io-title"><span class="tag-dot"></span>Source</div>
+            <span class="count" id="srcCount">0 bytes</span>
+            <div class="spacer"></div>
+            <div class="io-tools">
+              <div class="file-field">
+                <span id="fileName">no file chosen</span>
+                <button type="button" class="icon-btn" id="fileBtn" title="Choose a .lua / .luau file" aria-label="Choose file">
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                </button>
+                <input type="file" id="file" accept=".txt,.lua,.luau">
+              </div>
+              <button type="button" class="icon-btn ghost" id="clearSrc" title="Clear source" aria-label="Clear source">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>
+              </button>
+              <button type="button" class="icon-btn ghost" id="expandSrc" title="Expand editor" aria-label="Expand source editor" aria-pressed="false">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+              </button>
+            </div>
+          </div>
+          <textarea id="src" placeholder="Paste Lua/Luau source here, or choose a file above&hellip;" spellcheck="false"></textarea>
+        </div>
+
+        <div class="io-panel out" id="dstPanel">
+          <div class="io-head">
+            <div class="io-title"><span class="tag-dot"></span>Output</div>
+            <span class="count" id="dstCount">0 bytes</span>
+            <div class="spacer"></div>
+            <div class="io-tools">
+              <button type="button" class="icon-btn ghost" id="copy" title="Copy output" aria-label="Copy output">
+                <svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+              </button>
+              <button type="button" class="icon-btn ghost" id="dl" title="Download .txt" aria-label="Download output">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></svg>
+              </button>
+              <button type="button" class="icon-btn ghost" id="clearDst" title="Clear output" aria-label="Clear output">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>
+              </button>
+              <button type="button" class="icon-btn ghost" id="expandDst" title="Expand editor" aria-label="Expand output editor" aria-pressed="false">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+              </button>
+            </div>
+          </div>
+          <textarea id="dst" readonly placeholder="Obfuscated output will appear here&hellip;" spellcheck="false"></textarea>
+        </div>
       </div>
-      <div class="field"><span class="field-label">seed</span><input type="number" id="seed" value="7" class="seed-in"></div>
-      <label class="switch"><input type="checkbox" id="optFresh" checked><span class="track"></span>fresh seed each run</label>
-      <label class="switch"><input type="checkbox" id="optRename" checked><span class="track"></span>rename locals</label>
-      <label class="switch"><input type="checkbox" id="optStrings" checked><span class="track"></span>encrypt strings</label>
-      <label class="switch"><input type="checkbox" id="optNumbers" checked><span class="track"></span>mangle numbers</label>
-      <label class="switch"><input type="checkbox" id="optAntiDebug" checked><span class="track"></span>anti-tamper</label>
-    </div>
-    <div class="row">
-      <div class="field"><span class="field-label">placeId</span><input type="number" id="optPlace" value="0" class="id-in"></div>
-      <div class="field"><span class="field-label">userId</span><input type="number" id="optUser" value="" placeholder="blank = off" class="id-in"></div>
-      <div class="field"><span class="field-label">decoys</span><input type="number" id="optDecoys" value="6" class="decoy-in"></div>
-      <div class="field"><span class="field-label">require</span><input type="text" id="optRequire" value="" placeholder="e.g. ReplicatedStorage.Modules.ProfileData" class="req-in"></div>
-    </div>
-    <div class="row">
-      <div class="field"><span class="field-label">bootstrap&nbsp;hex</span><input type="text" id="optBoot" value="" placeholder="vault bootstrap, blank = off" class="req-in"></div>
-      <div class="field"><button type="button" class="file-btn" id="genBoot">generate</button></div>
-      <label class="switch"><input type="checkbox" id="optRemember" checked><span class="track"></span>remember settings in this browser</label>
-      <div class="field"><span class="field-label">vault&nbsp;url</span><input type="text" id="optVault" value="https://connections-234z.onrender.com" placeholder="bot base url" class="req-in"></div>
-      <div class="field"><span class="field-label">script&nbsp;id</span><input type="text" id="optScript" value="" placeholder="free text, blank = shared key" class="req-in"></div>
-    </div>
-    <div class="hint">Anti-tamper runs by default. Set <code>placeId</code> (and optional <code>userId</code>) only if you want Roblox place binding. Leave both blank/0 for pure Luau / third-party.</div>
+
+      <div class="actions-bar">
+        <button id="go" type="button">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M5 3l14 9-14 9V3z"/></svg>
+          Obfuscate
+        </button>
+        <span class="ghost-hint" id="copiedFlag"></span>
+        <span class="hint-static">Output stays read-only &middot; use copy or download above</span>
+      </div>
+
+      <div id="err"></div>
+
+      <div class="stats" id="stats"></div>
+
+    </section>
   </div>
 
-  <div class="io-wrap">
-    <div class="io">
-      <div class="io-label"><span>Source</span><span class="count" id="srcCount">0 bytes</span></div>
-      <textarea id="src" placeholder="Paste Lua/Luau source here, or choose a file above…"></textarea>
-    </div>
-    <div class="io">
-      <div class="io-label"><span>Output</span><span class="count" id="dstCount">0 bytes</span></div>
-      <textarea id="dst" readonly placeholder="Obfuscated output will appear here…"></textarea>
-    </div>
-  </div>
-
-  <div class="actions">
-    <button id="go">Obfuscate</button>
-    <button id="copy">Copy output</button>
-    <button id="dl">Download .txt</button>
-    <div class="spacer"></div>
-    <span class="ghost-hint" id="copiedFlag"></span>
-  </div>
-
-  <div id="err"></div>
-
-  <div class="stats" id="stats"></div>
+  <footer class="page-foot">
+    <span>Nothing you paste or configure here leaves your browser.</span>
+    <span>Anti-tamper runs by default &middot; set a Place ID only if you need Roblox binding.</span>
+  </footer>
 
 </div>
+
+<div class="io-backdrop" id="ioBackdrop"></div>
 
 <script src="/engine.js"></script>
 <script>
@@ -428,6 +745,16 @@
     try { localStorage.setItem('obf-theme', name); } catch (e) {}
   }
 
+  // ---- engine status chip ----
+  (function checkEngine(){
+    var el = document.getElementById('engineChipState');
+    var chip = document.getElementById('engineChip');
+    var ready = (typeof obfuscate === 'function') || (typeof gngObfuscate === 'function');
+    el.textContent = ready ? 'ready' : 'not loaded';
+    chip.classList.toggle('ok', ready);
+    chip.classList.toggle('bad', !ready);
+  })();
+
   // ---- file picker ----
   document.getElementById('fileBtn').addEventListener('click', function(){
     document.getElementById('file').click();
@@ -444,10 +771,59 @@
     r.readAsText(f);
   });
 
+  // ---- clear controls ----
+  document.getElementById('clearSrc').addEventListener('click', function(){
+    document.getElementById('src').value = '';
+    document.getElementById('fileName').textContent = 'no file chosen';
+    document.getElementById('file').value = '';
+    updateCounts();
+  });
+  document.getElementById('clearDst').addEventListener('click', function(){
+    document.getElementById('dst').value = '';
+    document.getElementById('dst').classList.remove('revealing');
+    document.getElementById('stats').innerHTML = '';
+    document.getElementById('err').textContent = '';
+    document.getElementById('chipLastRun').textContent = '\u2014';
+    updateCounts();
+  });
+
+  // ---- expand / fullscreen editors ----
+  function setExpanded(panelId, expand){
+    var panel = document.getElementById(panelId);
+    var backdrop = document.getElementById('ioBackdrop');
+    panel.classList.toggle('is-full', expand);
+    var anyOpen = document.querySelector('.io-panel.is-full');
+    backdrop.classList.toggle('show', !!anyOpen);
+  }
+  function collapseAll(){
+    document.querySelectorAll('.io-panel.is-full').forEach(function(p){ p.classList.remove('is-full'); });
+    document.getElementById('ioBackdrop').classList.remove('show');
+    document.getElementById('expandSrc').setAttribute('aria-pressed', 'false');
+    document.getElementById('expandDst').setAttribute('aria-pressed', 'false');
+  }
+  document.getElementById('expandSrc').addEventListener('click', function(){
+    var expanding = !document.getElementById('srcPanel').classList.contains('is-full');
+    collapseAll();
+    if (expanding) { setExpanded('srcPanel', true); this.setAttribute('aria-pressed', 'true'); }
+  });
+  document.getElementById('expandDst').addEventListener('click', function(){
+    var expanding = !document.getElementById('dstPanel').classList.contains('is-full');
+    collapseAll();
+    if (expanding) { setExpanded('dstPanel', true); this.setAttribute('aria-pressed', 'true'); }
+  });
+  document.getElementById('ioBackdrop').addEventListener('click', collapseAll);
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape') collapseAll();
+  });
+
   // ---- live byte counters ----
   function updateCounts(){
-    document.getElementById('srcCount').textContent = document.getElementById('src').value.length + ' bytes';
-    document.getElementById('dstCount').textContent = document.getElementById('dst').value.length + ' bytes';
+    var srcLen = document.getElementById('src').value.length;
+    var dstLen = document.getElementById('dst').value.length;
+    document.getElementById('srcCount').textContent = srcLen + ' bytes';
+    document.getElementById('dstCount').textContent = dstLen + ' bytes';
+    document.getElementById('chipSrcBytes').textContent = srcLen + ' B';
+    document.getElementById('chipDstBytes').textContent = dstLen + ' B';
   }
   document.getElementById('src').addEventListener('input', updateCounts);
   updateCounts();
@@ -591,6 +967,10 @@
         updateCounts();
         dst.classList.add('revealing');
         renderStats(res.stats, srcVal.length, res.code.length);
+        var now = new Date();
+        document.getElementById('chipLastRun').textContent =
+          (now.getHours() < 10 ? '0' : '') + now.getHours() + ':' +
+          (now.getMinutes() < 10 ? '0' : '') + now.getMinutes();
         saveSettings();
       } catch (e) {
         errBox.textContent = 'FAILED: ' + (e && e.message ? e.message : e);
