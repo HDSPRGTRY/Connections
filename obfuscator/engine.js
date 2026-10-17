@@ -1,35 +1,17 @@
-/* Luau/Lua source obfuscator engine (v5-upgraded)
+/* Luau/Lua source obfuscator engine (v5-upgraded + full improvements)
  *
- * Single-target source transformer for Luau / Lua.
- * ES3-compatible (browser, Node, cscript).
+ * Source transformer + optional VM-shell backend for Luau / Lua.
+ * ES3-compatible (browser, Node, cscript). Works on Render and any host.
  *
- * Transforms (upgraded with techniques from luau-obfuscator-v5):
- *   - Scope-correct local renaming (random short prefix + base36)
- *   - Per-literal string encryption (3-mix: additive + rolling XOR +
- *     position-dependent stream; v5-inspired multi-pass)
- *   - Shuffled constant pool with fake entries
- *   - Integer mangling (hex / split-add / xor / mul-mod)
- *   - Dead locals + optional decoy secrets + denser junk ops
- *   - Multi-layer anti-tamper stub (default on, v5-strengthened):
- *       builtin identity, rawequal on criticals, getfenv shape,
- *       _G metatable, injector-global soft probe, timing canary,
- *       arithmetic/string identity, coroutine integrity, sum gate,
- *       critical-ref lock, poison-key derivation on failed sum
- *
- * Optional Roblox binding (place/user residues, character wait, datatype
- * gauntlet, vault bootstrap) when opts.place / opts.user / opts.bootstrap set.
+ * Features:
+ *   - Local renaming, 3-mix string encryption, shuffled constant pool
+ *   - Number mangling + MBA, opaque predicates on if/while
+ *   - Denser junk, decoys, v5-strength anti-tamper
+ *   - Profiles: light | medium | heavy  (+ density 0..1)
+ *   - opts.vm: encrypted payload + dense loader (hybrid VM-shell)
+ *   - Optional Roblox place/user/vault binding
  *
  * API: obfuscate(source, seed, opts) -> { code, stats }
- *   opts: {
- *     rename, strings, numbers, antitamper, junk  (all default true)
- *     decoys: number,
- *     place, user: number (0 = unbound),
- *     require: dotted game path,
- *     bootstrap, vault, script: vault client options
- *   }
- *
- * Semantics-preserving for the supported subset. Throws on unsupported
- * constructs instead of emitting broken code.
  */
 
 (function (root, factory) {
@@ -47,13 +29,35 @@
 
 function obfuscate(src, seed, opts) {
   opts = opts || {};
+  var profile = (opts.profile || 'medium').toLowerCase();
+  if (profile !== 'light' && profile !== 'medium' && profile !== 'heavy') profile = 'medium';
+  var density = +opts.density;
+  if (!(density >= 0 && density <= 1)) {
+    density = profile === 'light' ? 0.35 : profile === 'heavy' ? 0.9 : 0.6;
+  }
   var doRename = opts.rename !== false;
   var doStrings = opts.strings !== false;
   var doNumbers = opts.numbers !== false;
   var doAnti = opts.antitamper !== false;
   var doJunk = opts.junk !== false;
+  var doOpaque = opts.opaque !== false && profile !== 'light';
+  var doMba = opts.mba !== false && profile !== 'light';
+  var doDelayStr = opts.delayStrings === true || (profile === 'heavy' && opts.delayStrings !== false);
+  var doVm = opts.vm === true;
   if (opts.antiDebug === false) doAnti = false;
   if (opts.antiDebug === true) doAnti = true;
+  if (profile === 'light') {
+    if (opts.junk !== true) doJunk = false;
+    if (opts.opaque !== true) doOpaque = false;
+    if (opts.mba !== true) doMba = false;
+    doDelayStr = opts.delayStrings === true;
+  }
+  if (profile === 'heavy') {
+    doJunk = opts.junk !== false;
+    doOpaque = opts.opaque !== false;
+    doMba = opts.mba !== false;
+    if (opts.delayStrings !== false) doDelayStr = true;
+  }
   var bindPlace = Math.floor(+opts.place || 0);
   var bindUser = Math.floor(+opts.user || 0);
   if (!(bindPlace > 0)) bindPlace = 0;
@@ -357,7 +361,7 @@ function obfuscate(src, seed, opts) {
     if (doNumbers && /^[0-9]+$/.test(text)) {
       var v = parseInt(text, 10);
       if (v < 2147483648 && v >= 0) {
-        var mode = rnd(5);
+        var mode = rnd(doMba ? 6 : 4);
         if (mode === 0) emit('0x' + v.toString(16));
         else if (mode === 1) {
           var a = rnd(v + 1);
@@ -366,8 +370,11 @@ function obfuscate(src, seed, opts) {
           var x = 1 + rnd(v);
           emit('(bit32 and bit32.bxor(' + (v ^ x) + ',' + x + ')or(' + v + '))');
         } else if (mode === 3 && v > 3) {
-          var m = 2 + rnd(7);
-          emit('(' + (v * m) + '%' + (v * m + 1) + '==' + v + ' and ' + v + ' or ' + v + ')');
+          var mm = 2 + rnd(7);
+          emit('(' + (v * mm) + '%' + (v * mm + 1) + '==' + v + ' and ' + v + ' or ' + v + ')');
+        } else if (doMba && mode === 4 && v > 0) {
+          var t = rnd(v + 1);
+          emit('(bit32 and(bit32.bxor(' + (v - t) + ',' + t + ')+2*bit32.band(' + (v - t) + ',' + t + '))or(' + v + '))');
         } else {
           var a2 = rnd(v + 1);
           emit('(' + a2 + '+' + (v - a2) + ')');
@@ -377,6 +384,19 @@ function obfuscate(src, seed, opts) {
       }
     }
     emit(text);
+  }
+  function opaqueTrue() {
+    var k = rnd(4);
+    if (k === 0) return '(not not 1)';
+    if (k === 1) return "(#''==0)";
+    if (k === 2) return '((1+2)*3==9)';
+    return '(true or false)';
+  }
+  function opaqueFalse() {
+    var k = rnd(3);
+    if (k === 0) return '(1==0)';
+    if (k === 1) return "(#''>0)";
+    return '((1+2)*3==8)';
   }
   function emitId(name) {
     if (PREV !== '.' && PREV !== ':') {
@@ -473,6 +493,11 @@ function obfuscate(src, seed, opts) {
     else if (tk[0] === 'KW' && tk[1] === 'if') parseIf();
     else if (tk[0] === 'KW' && tk[1] === 'while') {
       nxt(); emit('while');
+      if (doOpaque && rnd() < density) {
+        emit(opaqueTrue());
+        emit('and');
+        stats.opaque = (stats.opaque || 0) + 1;
+      }
       parseUntilKw('do');
       expect('do');
       push(); parseBlock(['end']); expect('end'); pop();
@@ -598,6 +623,11 @@ function obfuscate(src, seed, opts) {
 
   function parseIf() {
     nxt(); emit('if');
+    if (doOpaque && rnd() < density) {
+      emit(opaqueTrue());
+      emit('and');
+      stats.opaque = (stats.opaque || 0) + 1;
+    }
     parseUntilKw('then');
     expect('then');
     var tk;
@@ -844,15 +874,17 @@ function obfuscate(src, seed, opts) {
   }
   /* denser junk (v5-style) — dead locals + opaque arithmetic; controlled by opts.junk */
   var junk = '', j, jn;
-  var junkCount = doJunk ? (12 + rnd(10)) : 0;
+  var junkCount = doJunk ? Math.floor((8 + rnd(8)) * (0.5 + density)) : 0;
+  if (profile === 'heavy') junkCount += 6;
   for (j = 0; j < junkCount; j++) {
     jn = PREFIX + 'j' + j.toString(36);
-    var kind = rnd(5);
+    var kind = rnd(6);
     if (kind === 0) junk += 'local ' + jn + '=(' + rnd(10000) + '+' + rnd(10000) + ');';
     else if (kind === 1) junk += 'local ' + jn + '=(' + rnd(50) + '*' + rnd(50) + '-' + rnd(200) + ');';
     else if (kind === 2) junk += 'local ' + jn + '=(function(a,b)return a~=b and a or b end)(' + rnd(999) + ',' + rnd(999) + ');';
     else if (kind === 3) junk += 'local ' + jn + '=bit32 and bit32.bxor(' + rnd(255) + ',' + rnd(255) + ')or(' + rnd(255) + ');';
-    else junk += 'local ' + jn + '=(' + rnd(20) + '<' + (20 + rnd(30)) + ' and ' + rnd(500) + ' or ' + rnd(500) + ');';
+    else if (kind === 4) junk += 'local ' + jn + '=(' + rnd(20) + '<' + (20 + rnd(30)) + ' and ' + rnd(500) + ' or ' + rnd(500) + ');';
+    else junk += 'local ' + jn + '=(function()local a=' + rnd(50) + ';for i=1,' + (2+rnd(4)) + ' do a=a+i end;return a end)();';
   }
   /* Decoy secrets: correctly encrypted, decrypted at startup, never used.
      A dynamic dump records them alongside the real strings (noise); the
@@ -917,7 +949,11 @@ function obfuscate(src, seed, opts) {
     var parts = [];
     for (pi = 0; pi < order.length; pi++) {
       var oe = order[pi].e;
-      parts.push('function() return ' + DEC + '("' + oe[0] + '",' + oe[1] + ',' + oe[2] + ') end');
+      if (doDelayStr) {
+        parts.push('function()local v=' + DEC + '("' + oe[0] + '",' + oe[1] + ',' + oe[2] + ');return function()return v end end');
+      } else {
+        parts.push('function() return ' + DEC + '("' + oe[0] + '",' + oe[1] + ',' + oe[2] + ') end');
+      }
       if (order[pi].real) slotOf[order[pi].at] = pi + 1;
     }
     poolCode = 'local ' + CNM + '={' + parts.join(',') + '};';
@@ -994,6 +1030,10 @@ function obfuscate(src, seed, opts) {
   }
   stats.decoys = ndecoy;
   stats.junk = junkCount;
+  stats.opaque = stats.opaque || 0;
+  stats.profile = profile;
+  stats.density = density;
+  stats.vm = doVm;
   stats.bound = !bound ? 'off' : (bindUser > 0 ? 'place+user' : 'place');
   stats.require = REQPATH;
   stats.script = SCRIPTID;
@@ -1001,8 +1041,42 @@ function obfuscate(src, seed, opts) {
   var code = head + junk + decoyOut + poolCode + vaultCode + body;
   if (nreal > 0) {
     code = code.replace(new RegExp(POOLPFX + '(\\d+)', 'g'), function (m, n) {
-      return CNM + '[' + slotOf[parseInt(n, 10)] + ']()';
+      var call = CNM + '[' + slotOf[parseInt(n, 10)] + ']()';
+      return doDelayStr ? (call + '()') : call;
     });
+  }
+  /* VM-shell: encrypt final payload + dense loader (portable hybrid VM).
+     Full CFF bytecode VM lives in the v5 HTML tool; opts.vm here wraps the
+     already-obfuscated source in a decrypt+load shell that runs anywhere
+     loadstring/load is available (Roblox, many executors, Node via load). */
+  if (doVm) {
+    var payload = code;
+    var pk1 = '', pk2 = '', pi2;
+    for (pi2 = 0; pi2 < 16; pi2++) pk1 += String.fromCharCode(33 + rnd(90));
+    for (pi2 = 0; pi2 < 13; pi2++) pk2 += String.fromCharCode(33 + rnd(90));
+    var pbytes = [];
+    for (pi2 = 0; pi2 < payload.length; pi2++) {
+      var pb = payload.charCodeAt(pi2);
+      pb = pb ^ pk1.charCodeAt(pi2 % pk1.length);
+      pb = (pb + pk2.charCodeAt(pi2 % pk2.length)) % 256;
+      pbytes.push(pb);
+    }
+    var ld = PREFIX + 'L';
+    var bd = PREFIX + 'B';
+    var dk = PREFIX + 'K';
+    var loader = '';
+    loader += 'local ' + bd + '={' + pbytes.join(',') + '};';
+    loader += 'local ' + dk + '1="' + pk1.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '";';
+    loader += 'local ' + dk + '2="' + pk2.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '";';
+    loader += 'local function ' + ld + 'd()local o={}local b=' + bd + 'local k1=' + dk + '1 local k2=' + dk + '2;';
+    loader += 'for i=1,#b do local v=b[i];v=(v-k2:byte(((i-1)%#k2)+1))%256;v=bit32 and bit32.bxor(v,k1:byte(((i-1)%#k1)+1))or(v~k1:byte(((i-1)%#k1)+1));o[i]=string.char(v)end;';
+    loader += 'return table.concat(o)end;';
+    loader += 'local ' + ld + 's=' + ld + 'd();';
+    loader += 'local ' + ld + 'f=loadstring or load;';
+    loader += 'local ' + ld + 'fn=' + ld + 'f(' + ld + 's);';
+    loader += 'if ' + ld + 'fn then ' + ld + 'fn() end;';
+    code = (doAnti ? ANTI : '') + loader;
+    stats.vm_bytes = pbytes.length;
   }
   return {code: code + '\n', stats: stats};
 }
