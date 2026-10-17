@@ -362,11 +362,11 @@ function obfuscate(src, seed, opts) {
     if (mhex) {
       var hv = parseInt(mhex[1], 16);
       if (hv >= 0 && hv <= 0xFFFFFFFF) {
-        var kk = rnd(6);
-        if (kk === 0) emit('(bit32 and bit32.bxor(0x' + (hv ^ 0xFF).toString(16) + ',0x' + (0xFF).toString(16) + ')or(' + hv + '))');
-        else if (kk === 1) emit('(0x' + hv.toString(16) + ')');
-        else if (kk === 2) emit('(' + hv + ')');
-        else if (kk === 3 && hv > 3) { var hi = Math.floor(hv / 65536), lo = hv - hi * 65536; emit('(' + hi + '*65536+' + lo + ')'); }
+        var kk = rnd(5);
+        if (kk === 0) emit('(0x' + hv.toString(16) + ')');
+        else if (kk === 1) emit('(' + hv + ')');
+        else if (kk === 2 && hv > 3) { var hi = Math.floor(hv / 65536), lo = hv - hi * 65536; emit('(' + hi + '*65536+' + lo + ')'); }
+        else if (kk === 3) { var a = rnd(hv + 1); emit('(' + a + '+' + (hv - a) + ')'); }
         else emit('(0x' + hv.toString(16) + ')');
         stats.num_mangled++;
         return;
@@ -380,7 +380,7 @@ function obfuscate(src, seed, opts) {
         var kkb = rnd(3);
         if (kkb === 0) emit('(' + bv + ')');
         else if (kkb === 1 && bv > 3) { var hib = Math.floor(bv / 65536), lob = bv - hib * 65536; emit('(' + hib + '*65536+' + lob + ')'); }
-        else emit('(0b' + bv.toString(2) + ')');
+        else emit('(' + bv + ')');
         stats.num_mangled++;
         return;
       }
@@ -389,17 +389,12 @@ function obfuscate(src, seed, opts) {
     if (/^[0-9]+$/.test(t)) {
       var v = parseInt(t, 10);
       if (v >= 0 && v <= 0x1FFFFFFFFFFFFF) {
-        var mode = rnd(doMba ? 8 : 5);
+        var mode = rnd(doMba ? 6 : 4);
         if (mode === 0) emit('0x' + v.toString(16));
         else if (mode === 1) { var a = rnd(v + 1); emit('(' + a + '+' + (v - a) + ')'); }
-        else if (mode === 2 && v > 1) { var x = 1 + rnd(v); emit('(bit32 and bit32.bxor(' + (v ^ x) + ',' + x + ')or(' + v + '))'); }
-        else if (mode === 3 && v > 3) { var hi3 = Math.floor(v / 65536), lo3 = v - hi3 * 65536; emit('(' + hi3 + '*65536+' + lo3 + ')'); }
-        else if (mode === 4 && v > 0) {
-          var t2 = rnd(v + 1);
-          emit('(bit32 and(bit32.bxor(' + (v - t2) + ',' + t2 + ')+2*bit32.band(' + (v - t2) + ',' + t2 + '))or(' + v + '))');
-        }
-        else if (doMba && mode === 5 && v > 3) emit('((' + (v * 2) + ')-(' + v + '))');
-        else if (doMba && mode === 6 && v > 3) emit('(bit32 and(bit32.bxor(bit32.bxor(' + v + ',255),255))or(' + v + '))');
+        else if (mode === 2 && v > 3) { var hi3 = Math.floor(v / 65536), lo3 = v - hi3 * 65536; emit('(' + hi3 + '*65536+' + lo3 + ')'); }
+        else if (mode === 3 && v > 0) { var t2 = rnd(v + 1); emit('((' + (v - t2) + ')+' + t2 + ')'); }
+        else if (doMba && mode === 4 && v > 3) emit('((' + (v * 2) + ')-(' + v + '))');
         else { var a2 = rnd(v + 1); emit('(' + a2 + '+' + (v - a2) + ')'); }
         stats.num_mangled++;
         return;
@@ -428,16 +423,16 @@ function obfuscate(src, seed, opts) {
     var k = rnd(6);
     if (k === 0) return "((#'\\x1f\\x20\\x1e')==3)";
     if (k === 1) return "((#'\\x01\\x02\\x03\\x04')==4)";
-    if (k === 2) return '((bit32 and bit32.bxor(7,7)or 0)==0)';
+    if (k === 2) return "((1+2)*3==9)";
     if (k === 3) return "(({1,2,3})[3]==3)";
     if (k === 4) return "((tostring(0)=='0'))";
-    return '((1+2)*3==9)';
+    return '((#\"\\x00\\x01\\x02\")==3)';
   }
   function opaqueFalse() {
     var k = rnd(4);
     if (k === 0) return "((#'\\x00\\x00\\x00\\x00')==3)";
     if (k === 1) return "(({1,2})[1]==2)";
-    if (k === 2) return '((bit32 and bit32.bxor(7,7)or 0)==1)';
+    if (k === 2) return '((1+2)*3==8)';
     return '(1==0)';
   }
 
@@ -503,8 +498,10 @@ function obfuscate(src, seed, opts) {
       chainPacked += (KCHAIN[i] < 10 ? '00' : (KCHAIN[i] < 100 ? '0' : '')) + KCHAIN[i];
     }
     // pack 64*3 = 192 chars → single literal
+    // Pure arithmetic XOR (works on Lua 5.1 and Luau; no bit32 / ~ required)
     var decCode = '';
     decCode += 'local _ch="' + chainPacked + '";'
+      + 'local function ' + PREFIX + 'bx(a,b)local r,p=0,1;a=a%256;b=b%256;while a>0 or b>0 do local x=a%2;local y=b%2;if x~=y then r=r+p end;a=(a-x)/2;b=(b-y)/2;p=p*2 end;return r end;'
       + 'local function ' + PREFIX + 'key(s,kk)local p=((s*17+kk*5+131)%' + KCHAIN.length + ')*3+1;'
       + 'local v=tonumber(_ch:sub(p,p+2));'
       + 'local k=(v+s)%256;if k==0 then k=1 end;return k end;';
@@ -521,7 +518,7 @@ function obfuscate(src, seed, opts) {
           + 'for i=1,#h,2 do local p=(i+1)/2;'
           + 'roll=(roll*73+(p-1)*11+k)%256;roll2=(roll2*47+(p-1)*19+k2)%256;'
           + 'local b=tonumber(h:sub(i,i+1),16);b=(b-roll2)%256;'
-          + 'b=bit32 and bit32.bxor(b,roll)or(b~roll);'
+          + 'b=' + PREFIX + 'bx(b,roll);'
           + 'b=(b-k-K-(q*7)-((p-1)*3))%256;r[#r+1]=string.char(b)end '
           + 'return table.concat(r)end;';
       } else {
@@ -536,7 +533,7 @@ function obfuscate(src, seed, opts) {
           + 'for i=nb,1,-1 do local p=i;'
           + 'local b=tonumber(h:sub((p-1)*2+1,(p-1)*2+2),16);'
           + 'b=(b-r2s[p])%256;'
-          + 'b=bit32 and bit32.bxor(b,rs[p])or(b~rs[p]);'
+          + 'b=' + PREFIX + 'bx(b,rs[p]);'
           + 'b=(b-k-K-(q*7)-((p-1)*3))%256;'
           + 'table.insert(r,1,string.char(b))end '
           + 'return table.concat(r)end;';
@@ -552,11 +549,12 @@ function obfuscate(src, seed, opts) {
         var didx = rnd(NDEC);
         var dn2 = PREFIX + 'D' + didx.toString(36);
         if (delayStr) {
-          entries.push('(function()local c;return function()if c==nil then c=' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K)end;return c end end)()');
+          entries.push('function()local v=' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K);return function()return v end end');
         } else {
           entries.push('function()return ' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K)end');
         }
-        allSlotInfo[e.idx] = {pool: i, shuffledIdx: j};
+        // Lua tables are 1-based; emit 1-based indices
+        allSlotInfo[e.idx] = {pool: i, shuffledIdx: j + 1};
       }
       poolCode += 'local ' + PREFIX + 'P' + i + '={' + entries.join(',') + '};';
     }
@@ -564,9 +562,8 @@ function obfuscate(src, seed, opts) {
 
     function access(slotIdx) {
       var info = allSlotInfo[slotIdx];
-      /* Luau/Lua arrays are 1-indexed — shuffledIdx is 0-based from JS */
       if (!info) return PREFIX + 'P0[1]';
-      return PREFIX + 'P' + info.pool + '[' + (info.shuffledIdx + 1) + ']';
+      return PREFIX + 'P' + info.pool + '[' + info.shuffledIdx + ']';
     }
 
     return {
@@ -1260,35 +1257,21 @@ function obfuscate(src, seed, opts) {
     return { code: runtime, opcodeCount: opEntries.length, instrCount: code.length };
   }
 
-  // -------- anti-tamper (soft-fail) --------
+  // -------- anti-tamper (soft-fail, executor-friendly) --------
   function buildAntiTamper() {
+    // Soft anti-tamper tuned for 3rd-party executors.
+    // Avoids getfenv, heavy coroutine probes, tight timing checks and
+    // environment equality tests that commonly false-positive under sandboxes.
     var P = PREFIX;
-    var ig = P + 'ig';
     var sm = P + 'sm';
-    var rg = P + 'rg';
-    var pc = P + 'pc';
     var ty = P + 'ty';
-    var ts = P + 'ts';
-    var re = P + 're';
-    var gm = P + 'gm';
-    var cl = P + 'cl';
-    var hx = P + 'hx';
     var lines = [];
-    lines.push('local ' + rg + ',' + pc + ',' + ty + ',' + ts + ',' + re + ',' + gm + '=rawget,pcall,type,tostring,rawequal,getmetatable');
-    lines.push('local ' + cl + '=(os and os.clock)or(tick)or function()return 0 end');
+    lines.push('local ' + ty + '=type');
     lines.push('local ' + sm + '=0');
-    lines.push('local function ' + ig + '()' + sm + '=(' + sm + '+17)%89 end');
-    lines.push('do local t={print,pcall,type,pairs,setmetatable,rawget,tostring};local i;for i=1,#t do if ' + ty + '(t[i])~="function"then ' + ig + '()end;' + sm + '=' + sm + '+7 end end');
-    lines.push('if _G and ' + ty + '(_G)=="table"then if _G.pcall and not ' + re + '(_G.pcall,pcall)then ' + ig + '()end;if _G.type and not ' + re + '(_G.type,type)then ' + ig + '()end;' + sm + '=' + sm + '+19 end');
-    lines.push('if getfenv then local ok,e=' + pc + '(getfenv,0);if ok and e and ' + ty + '(e)=="table"then local m=' + gm + '(e);if m and m.__index and m.__index~=_G then ' + ig + '()end end;' + sm + '=' + sm + '+41 end');
-    lines.push('do local m=' + gm + '(_G);if m and m.__newindex then ' + sm + '=' + sm + '+11 else ' + sm + '=' + sm + '+19 end end');
-    lines.push('' + sm + '=' + sm + '+19');
-    lines.push('do local t0=' + cl + '();local x=0;local i;for i=1,350 do x=x+i end;if ' + cl + '()-t0>0.4 then ' + ig + '()end;' + sm + '=' + sm + '+29 end');
-    lines.push('do local s=0;if(1+2)*3==9 and(10%3)==1 then s=s+17 end;if math and math.floor(3.9)==3 then s=s+13 end;if string and string.byte("A")==65 then s=s+11 end;' + sm + '=' + sm + '+s end');
-    lines.push('do local ok=true;if ' + ty + '(coroutine)=="table"then local c=coroutine.create(function()coroutine.yield(1)return 2 end);local o1,v1=coroutine.resume(c);if not o1 or v1~=1 then ok=false end;local o2,v2=coroutine.resume(c);if not o2 or v2~=2 then ok=false end;if coroutine.status(c)~="dead"then ok=false end else ok=false end;if not ok then ' + ig + '()end;' + sm + '=' + sm + '+23 end');
-    lines.push('local _p,_c,_t,_pa,_sm=print,pcall,type,pairs,setmetatable');
-    lines.push('local function ' + hx + '()if print~=_p or pcall~=_c or type~=_t or pairs~=_pa or setmetatable~=_sm then ' + ig + '()end end');
-    lines.push(hx + '()');
+    lines.push('do local t={print,pcall,type,pairs,tostring};local i;for i=1,#t do if ' + ty + '(t[i])~="function"then ' + sm + '=' + sm + '+17 end end end');
+    lines.push('do local s=0;if(1+2)*3==9 and(10%3)==1 then s=s+41 end;if math and math.floor(3.9)==3 then s=s+29 end;if string and string.byte("A")==65 then s=s+23 end;' + sm + '=' + sm + '+s end');
+    lines.push('do local cl=(os and os.clock)or(tick)or function()return 0 end;local t0=cl();local x=0;local i;for i=1,200 do x=x+i end;if cl()-t0>1.5 then ' + sm + '=' + sm + '+13 end end');
+    lines.push('' + sm + '=' + sm + '+93');
     lines.push('local _k0=' + (SALT | 0) + ';');
     lines.push('local ' + P + 'K=(_k0+((' + sm + '>=160 and ' + sm + '<=260)and 0 or 137))%256;');
     return lines.join(';') + ';';
@@ -1339,7 +1322,8 @@ function obfuscate(src, seed, opts) {
     head += 'local ' + PREFIX + 'K=' + SALT + ';';
   }
   if (doHideEnv) {
-    head += 'local _E=(_G or (getfenv and getfenv()) or {});';
+    // Prefer _G; getfenv is removed in modern Luau and often missing/broken on executors
+    head += 'local _E=(_G or {});';
   }
   head += poolInfo.code;
 
@@ -1403,12 +1387,12 @@ function obfuscate(src, seed, opts) {
     poolInfo = buildPoolCode(POOL, doDelayStr);
     head = '';
     if (doAnti) head += buildAntiTamper(); else head += 'local ' + PREFIX + 'K=' + SALT + ';';
-    if (doHideEnv) head += 'local _E=(_G or (getfenv and getfenv()) or {});';
+    if (doHideEnv) head += 'local _E=(_G or {});';
     head += poolInfo.code;
     // decoy bodies use pool indices after the original count
     var origPoolLen = POOL.length - ndecoy;
     for (var ddI = 0; ddI < ndecoy; ddI++) {
-      decoyOut += 'local _x' + ddI + '=' + poolInfo.access(origPoolLen + ddI) + '();';
+      decoyOut += 'local _x' + ddI + '=' + poolInfo.access(origPoolLen + ddI) + (doDelayStr ? '()()' : '()') + ';';
     }
   }
 
@@ -1426,7 +1410,8 @@ function obfuscate(src, seed, opts) {
   if (POOL.length > 0) {
     code = code.replace(new RegExp(POOLPFX + '(\\d+)', 'g'), function (m, n) {
       var call = poolInfo.access(parseInt(n, 10));
-      return doDelayStr ? (call + '()') : (call + '()');
+      // delayStrings wraps the decrypted value in an extra function, so call twice
+      return doDelayStr ? (call + '()()') : (call + '()');
     });
   }
 
