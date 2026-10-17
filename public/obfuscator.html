@@ -586,7 +586,7 @@
           bootstrap: (document.getElementById('optBoot').value || '').replace(/\s+/g, ''),
           vault: (document.getElementById('optVault').value || '').replace(/\/+$/g, ''),
           script: (document.getElementById('optScript').value || '').replace(/^\s+|\s+$/g, '')
-        });
+        }));
         dst.value = res.code;
         updateCounts();
         dst.classList.add('revealing');
