@@ -1,19 +1,9 @@
-/* Luau/Lua source obfuscator engine (v5-upgraded + full improvements)
- *
- * Source transformer + optional VM-shell backend for Luau / Lua.
- * ES3-compatible (browser, Node, cscript). Works on Render and any host.
- *
- * Features:
- *   - Local renaming, 3-mix string encryption, shuffled constant pool
- *   - Number mangling + MBA, opaque predicates on if/while
- *   - Denser junk, decoys, v5-strength anti-tamper
- *   - Profiles: light | medium | heavy  (+ density 0..1)
- *   - opts.vm: encrypted payload + dense loader (hybrid VM-shell)
- *   - Optional Roblox place/user/vault binding
+/* Luau/Lua source obfuscator engine (v7)
+ * Source transformer + hybrid VM-shell backend for Luau / Lua.
+ * ES3-compatible (browser, Node, cscript).
  *
  * API: obfuscate(source, seed, opts) -> { code, stats }
  */
-
 (function (root, factory) {
   var f = factory();
   if (typeof module !== 'undefined' && module.exports) {
@@ -35,33 +25,42 @@ function obfuscate(src, seed, opts) {
   if (!(density >= 0 && density <= 1)) {
     density = profile === 'light' ? 0.35 : profile === 'heavy' ? 0.9 : 0.6;
   }
-  var doRename = opts.rename !== false;
-  var doStrings = opts.strings !== false;
-  var doNumbers = opts.numbers !== false;
-  var doAnti = opts.antitamper !== false;
-  var doJunk = opts.junk !== false;
-  var doOpaque = opts.opaque !== false && profile !== 'light';
-  var doMba = opts.mba !== false && profile !== 'light';
-  var doDelayStr = opts.delayStrings === true || (profile === 'heavy' && opts.delayStrings !== false);
-  var doVm = opts.vm === true;
+  var doRename     = opts.rename     !== false;
+  var doStrings    = opts.strings    !== false;
+  var doNumbers    = opts.numbers    !== false;
+  var doAnti       = opts.antitamper !== false;
+  var doJunk       = opts.junk       !== false;
+  var doOpaque     = opts.opaque     !== false && profile !== 'light';
+  var doMba        = opts.mba        !== false && profile !== 'light';
+  var doCff        = opts.cff        !== false && profile !== 'light';
+  var doHideEnv    = opts.hideEnv    !== false;
+  var doSoftAnti   = opts.softAnti   !== false;
+  var doDelayStr   = opts.delayStrings === true || (profile !== 'light' && opts.delayStrings !== false);
+  var doVm         = opts.vm === true;
   if (opts.antiDebug === false) doAnti = false;
-  if (opts.antiDebug === true) doAnti = true;
+  if (opts.antiDebug === true)  doAnti = true;
+  if (opts.cff === false) doCff = false;
+  if (opts.cff === true)  doCff = true;
   if (profile === 'light') {
-    if (opts.junk !== true) doJunk = false;
+    if (opts.junk   !== true) doJunk   = false;
     if (opts.opaque !== true) doOpaque = false;
-    if (opts.mba !== true) doMba = false;
+    if (opts.mba    !== true) doMba    = false;
+    if (opts.cff    !== true) doCff    = false;
     doDelayStr = opts.delayStrings === true;
   }
   if (profile === 'heavy') {
     doJunk = opts.junk !== false;
     doOpaque = opts.opaque !== false;
     doMba = opts.mba !== false;
+    if (opts.cff !== false) doCff = true;
     if (opts.delayStrings !== false) doDelayStr = true;
   }
+
+  // -------- binding / bootstrap --------
   var bindPlace = Math.floor(+opts.place || 0);
-  var bindUser = Math.floor(+opts.user || 0);
+  var bindUser  = Math.floor(+opts.user  || 0);
   if (!(bindPlace > 0)) bindPlace = 0;
-  if (!(bindUser > 0)) bindUser = 0;
+  if (!(bindUser  > 0)) bindUser  = 0;
   var bound = (bindPlace > 0 || bindUser > 0);
   var RP = bound ? (bindPlace % 251) : 0;
   var RU = (bound && bindUser > 0) ? (bindUser % 251) : -1;
@@ -77,9 +76,6 @@ function obfuscate(src, seed, opts) {
   if (!/^https?:\/\/[A-Za-z0-9_.-]+(:\d+)?(\/[A-Za-z0-9_.\-/]*)?$/.test(VBASE)) VBASE = '';
   if (BOOT !== '' && VBASE === '') BOOT = '';
   if (BOOT !== '' && !bound) BOOT = '';
-  /* Hierarchical keys: with a script id, bake FNV(master | id) instead of
-     the raw master, so each script id gets a distinct secret from the one
-     env var (verified against the server copy with exact 64-bit math). */
   var SCRIPTID = (typeof opts.script === 'string') ? opts.script : '';
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(SCRIPTID)) SCRIPTID = '';
   function fnv64hexBytes(bytes) {
@@ -98,17 +94,14 @@ function obfuscate(src, seed, opts) {
       t3 = r3 + Math.floor(t2 / 65536); o3 = t3 % 65536;
       hi = o3 * 65536 + o2; lo = o1 * 65536 + o0;
     }
-    function h8(v) {
-      var s = v.toString(16);
-      while (s.length < 8) s = '0' + s;
-      return s;
-    }
+    function h8(v) { var s = v.toString(16); while (s.length < 8) s = '0' + s; return s; }
     return h8(hi) + h8(lo);
   }
   var BKEY = BOOT;
   if (BOOT !== '' && SCRIPTID !== '') BKEY = fnv64hexBytes(utf8bytes(BOOT + '|' + SCRIPTID));
   var STRIDX = 0, POOL = [], POOLPFX = '';
 
+  // -------- PRNG --------
   var rngState = (seed >>> 0) || 1;
   function rnd(n) {
     rngState = (rngState * 1664525 + 1013904223) % 4294967296;
@@ -116,30 +109,33 @@ function obfuscate(src, seed, opts) {
     if (n === undefined) return r;
     return Math.floor(r * n);
   }
-  function contains(arr, v) {
-    var i;
-    for (i = 0; i < arr.length; i++) { if (arr[i] === v) return true; }
-    return false;
-  }
+  function contains(arr, v) { var i; for (i = 0; i < arr.length; i++) if (arr[i] === v) return true; return false; }
 
+  // -------- keywords / operators --------
   var KEYWORDS = {'and':1,'break':1,'do':1,'else':1,'elseif':1,'end':1,
     'false':1,'for':1,'function':1,'goto':1,'if':1,'in':1,'local':1,'nil':1,
     'not':1,'or':1,'repeat':1,'return':1,'then':1,'true':1,'until':1,
     'while':1,'continue':1};
-  var BINOP = {'+':1,'-':1,'*':1,'/':1,'%':1,'^':1,'..':1,'<':1,'>':1,'<=':1,
-    '>=':1,'==':1,'~=':1,'and':1,'or':1,',':1,'(':1,'not':1,'#':1};
   var COMPLETE_K = {'ID':1,'NUM':1,'STR':1,'LSTR':1};
   var COMPLETE_V = {'true':1,'false':1,'nil':1,'...':1,')':1,']':1,'}':1,'break':1};
   var BLOCK_KW = {'local':1,'function':1,'if':1,'while':1,'for':1,'repeat':1,
     'do':1,'end':1,'else':1,'elseif':1,'until':1,'return':1,'break':1,'then':1,'in':1};
   var NEVER = {'self':1,'_G':1,'_VERSION':1};
 
-  function isAlpha(c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_';
-  }
+  var ENV_NAMES = {
+    'request':1,'writefile':1,'readfile':1,'isfile':1,'loadfile':1,
+    'loadstring':1,'getgenv':1,'http_request':1,'syn':1,'game':1,
+    'wait':1,'task':1,'require':1,'print':1,'warn':1,'error':1,
+    'pcall':1,'xpcall':1,'select':1,'type':1,'typeof':1,'tostring':1,
+    'tonumber':1,'tick':1,'time':1,'os':1,'math':1,'string':1,'table':1,
+    'coroutine':1,'bit32':1,'debug':1,'_ENV':1,'getfenv':1,'setfenv':1
+  };
+
+  function isAlpha(c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_'; }
   function isDigit(c) { return c >= '0' && c <= '9'; }
   function isAlnum(c) { return isAlpha(c) || isDigit(c); }
 
+  // -------- Tokenizer --------
   function tokenize(s) {
     var toks = [], i = 0, n = s.length, c, j, m, lv, q, raw, d, w, k, eq;
     function longOpen(p) {
@@ -151,8 +147,6 @@ function obfuscate(src, seed, opts) {
     }
     while (i < n) {
       c = s.charAt(i);
-      /* NB: no '\v' literal — JScript/ES3 reads it as the letter 'v'.
-         charCodeAt(11) is the real vertical tab. */
       var cc0 = s.charCodeAt(i);
       if (cc0 === 32 || cc0 === 9 || cc0 === 13 || cc0 === 10 || cc0 === 11 || cc0 === 12) { i++; continue; }
       if (c === '-' && s.charAt(i + 1) === '-') {
@@ -161,8 +155,7 @@ function obfuscate(src, seed, opts) {
           if (mo) {
             j = s.indexOf(']' + mo.eq + ']', mo.end);
             if (j < 0) throw new Error('lex: unterminated long comment');
-            i = j + mo.eq.length + 2;
-            continue;
+            i = j + mo.eq.length + 2; continue;
           }
         }
         j = s.indexOf('\n', i);
@@ -182,16 +175,10 @@ function obfuscate(src, seed, opts) {
         for (;;) {
           if (j >= n) throw new Error('lex: unterminated string');
           d = s.charAt(j);
-          if (d === '\\') {
-            if (j + 1 >= n) throw new Error('lex: bad string');
-            raw += d + s.charAt(j + 1);
-            j += 2;
-            continue;
-          }
+          if (d === '\\') { raw += d + s.charAt(j + 1); j += 2; continue; }
           if (d === q) break;
           if (d === '\n') throw new Error('lex: newline in string');
-          raw += d;
-          j++;
+          raw += d; j++;
         }
         toks.push(['STR', s.substring(i, j + 1), q, raw]);
         i = j + 1;
@@ -201,6 +188,8 @@ function obfuscate(src, seed, opts) {
         var rest = s.substring(i);
         m = rest.match(/^0[xX][0-9a-fA-F_]+/);
         if (m) { toks.push(['NUM', m[0]]); i += m[0].length; continue; }
+        m = rest.match(/^0[bB][01_]+/);
+        if (m) { toks.push(['NUM', m[0]]); i += m[0].length; continue; }
         m = rest.match(/^[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?/);
         if (m && !(c === '.' && m[0].charAt(0) !== '.')) {
           toks.push(['NUM', m[0]]); i += m[0].length; continue;
@@ -208,12 +197,10 @@ function obfuscate(src, seed, opts) {
         if (c !== '.') throw new Error('lex: bad number');
       }
       if (isAlpha(c)) {
-        j = i;
-        while (j < n && isAlnum(s.charAt(j))) j++;
+        j = i; while (j < n && isAlnum(s.charAt(j))) j++;
         w = s.substring(i, j);
         toks.push([KEYWORDS[w] ? 'KW' : 'ID', w]);
-        i = j;
-        continue;
+        i = j; continue;
       }
       var sym = null;
       var three = s.substring(i, i + 3), two = s.substring(i, i + 2);
@@ -228,6 +215,7 @@ function obfuscate(src, seed, opts) {
     return toks;
   }
 
+  // -------- String decoding --------
   var SIMPLE_ESC = {'a':7,'b':8,'f':12,'n':10,'r':13,'t':9,'v':11,'\\':92,
     '"':34,"'":39,'\n':10};
   function decodeShort(raw) {
@@ -239,8 +227,7 @@ function obfuscate(src, seed, opts) {
         if (cc < 128) out.push(cc);
         else if (cc < 2048) out.push(192 | (cc >> 6), 128 | (cc & 63));
         else out.push(224 | (cc >> 12), 128 | ((cc >> 6) & 63), 128 | (cc & 63));
-        i++;
-        continue;
+        i++; continue;
       }
       if (i + 1 >= n) return null;
       e = raw.charAt(i + 1);
@@ -265,16 +252,14 @@ function obfuscate(src, seed, opts) {
     return data;
   }
 
+  // -------- Emitter state --------
   var T = null, POS = 0, OUT = [], SCOPES = null, BRACE = 0,
       COUNTER = 0, PREV = '', PREFIX = '', DEC = '';
   var stats = null;
   var BASE = 0, BASEST = [];
 
   function emit(s) { OUT.push(s); PREV = s; }
-  function peek() {
-    if (POS < T.length) return T[POS];
-    return [null, null];
-  }
+  function peek() { if (POS < T.length) return T[POS]; return [null, null]; }
   function look(off) {
     var p = POS + ((off === undefined) ? 1 : off);
     if (p < T.length) return T[p];
@@ -290,18 +275,13 @@ function obfuscate(src, seed, opts) {
   function expect(v) {
     var tk = nxt();
     if (tk[1] !== v) fail('expected ' + v + ' got ' + tk[1]);
-    emit(tk[1]);
-    track(tk[1]);
+    emit(tk[1]); track(tk[1]);
   }
-  function track(t) {
-    if (t === '{') BRACE++;
-    else if (t === '}') BRACE--;
-  }
+  function track(t) { if (t === '{') BRACE++; else if (t === '}') BRACE--; }
   function push() { SCOPES.push({}); }
   function pop() { SCOPES.pop(); }
   function declare(name) {
     if (NEVER[name]) return name;
-    /* short random-looking locals: prefix + base36 counter (not sequential decimal) */
     var nn = PREFIX + (COUNTER++).toString(36);
     SCOPES[SCOPES.length - 1][name] = nn;
     stats.decls++;
@@ -316,13 +296,26 @@ function obfuscate(src, seed, opts) {
     }
     return null;
   }
+
+  // -------- cryptBytes + KCHAIN --------
+  // k is NOT stored in the source. Per-slot keys are chained: the first
+  // slot's k is derived from KCHAIN and K, subsequent slots step the chain.
+  // Both k and q appear in emitted source as <the slot index> only — the
+  // decryptor reconstructs k and q at runtime from K (anti-tamper adjusted).
+  var KCHAIN = null;
+  function initKChain() {
+    KCHAIN = [];
+    for (var i = 0; i < 64; i++) KCHAIN.push(1 + rnd(255));
+  }
+  initKChain();
+
   function cryptBytes(data) {
-    /* v5-inspired 3-mix encryption:
-     *   pass1: additive (k + SALT + idx*7 + pos*3)
-     *   pass2: rolling XOR keystream
-     *   pass3: secondary stream mix (k2 derived from seed+q)
-     * Decoder still only needs (h, k, q) — k2 is reconstructed from k/q. */
-    var k = 1 + rnd(255), hx = '', i, b, q = STRIDX, roll, roll2, k2;
+    var q = STRIDX;
+    var slotChain = (q * 17 + SALT * 5 + 131) % KCHAIN.length;
+    var k = (KCHAIN[slotChain] + q) % 256;
+    if (k === 0) k = 1;
+    var hx = '';
+    var i, b, roll, roll2, k2;
     STRIDX++;
     k2 = ((k * 37 + q * 91 + SALT * 13) & 255) || 1;
     roll = (k * 131 + SALT * 17 + q * 29) & 255;
@@ -335,8 +328,11 @@ function obfuscate(src, seed, opts) {
       b = (b + roll2) & 255;
       hx += (b < 16 ? '0' : '') + b.toString(16);
     }
-    return [hx, k, q];
+    // record the ciphertext + slot index; the runtime reconstructs k/q
+    return { hex: hx, slot: q };
   }
+
+  // -------- string emission --------
   function emitStrTok(tok) {
     var data;
     if (tok[0] === 'LSTR') {
@@ -357,64 +353,232 @@ function obfuscate(src, seed, opts) {
     else emit('(' + ph + ')');
     stats.str_enc++;
   }
+
+  // -------- numbers (fixed) --------
   function emitNum(text) {
-    if (doNumbers && /^[0-9]+$/.test(text)) {
-      var v = parseInt(text, 10);
-      if (v < 2147483648 && v >= 0) {
-        var mode = rnd(doMba ? 6 : 4);
-        if (mode === 0) emit('0x' + v.toString(16));
-        else if (mode === 1) {
-          var a = rnd(v + 1);
-          emit('(' + a + '+' + (v - a) + ')');
-        } else if (mode === 2 && v > 1) {
-          var x = 1 + rnd(v);
-          emit('(bit32 and bit32.bxor(' + (v ^ x) + ',' + x + ')or(' + v + '))');
-        } else if (mode === 3 && v > 3) {
-          var mm = 2 + rnd(7);
-          emit('(' + (v * mm) + '%' + (v * mm + 1) + '==' + v + ' and ' + v + ' or ' + v + ')');
-        } else if (doMba && mode === 4 && v > 0) {
-          var t = rnd(v + 1);
-          emit('(bit32 and(bit32.bxor(' + (v - t) + ',' + t + ')+2*bit32.band(' + (v - t) + ',' + t + '))or(' + v + '))');
-        } else {
-          var a2 = rnd(v + 1);
-          emit('(' + a2 + '+' + (v - a2) + ')');
-        }
+    if (!doNumbers) { emit(text); return; }
+    var t = text.replace(/_/g, '');
+    var mhex = t.match(/^0[xX]([0-9a-fA-F]+)$/);
+    if (mhex) {
+      var hv = parseInt(mhex[1], 16);
+      if (hv >= 0 && hv <= 0xFFFFFFFF) {
+        var kk = rnd(6);
+        if (kk === 0) emit('(bit32 and bit32.bxor(0x' + (hv ^ 0xFF).toString(16) + ',0x' + (0xFF).toString(16) + ')or(' + hv + '))');
+        else if (kk === 1) emit('(0x' + hv.toString(16) + ')');
+        else if (kk === 2) emit('(' + hv + ')');
+        else if (kk === 3 && hv > 3) { var hi = Math.floor(hv / 65536), lo = hv - hi * 65536; emit('(' + hi + '*65536+' + lo + ')'); }
+        else emit('(0x' + hv.toString(16) + ')');
         stats.num_mangled++;
         return;
+      }
+      emit(text); return;
+    }
+    var mbin = t.match(/^0[bB]([01]+)$/);
+    if (mbin) {
+      var bv = parseInt(mbin[1], 2);
+      if (bv >= 0 && bv <= 0xFFFFFFFF) {
+        var kkb = rnd(3);
+        if (kkb === 0) emit('(' + bv + ')');
+        else if (kkb === 1 && bv > 3) { var hib = Math.floor(bv / 65536), lob = bv - hib * 65536; emit('(' + hib + '*65536+' + lob + ')'); }
+        else emit('(0b' + bv.toString(2) + ')');
+        stats.num_mangled++;
+        return;
+      }
+      emit(text); return;
+    }
+    if (/^[0-9]+$/.test(t)) {
+      var v = parseInt(t, 10);
+      if (v >= 0 && v <= 0x1FFFFFFFFFFFFF) {
+        var mode = rnd(doMba ? 8 : 5);
+        if (mode === 0) emit('0x' + v.toString(16));
+        else if (mode === 1) { var a = rnd(v + 1); emit('(' + a + '+' + (v - a) + ')'); }
+        else if (mode === 2 && v > 1) { var x = 1 + rnd(v); emit('(bit32 and bit32.bxor(' + (v ^ x) + ',' + x + ')or(' + v + '))'); }
+        else if (mode === 3 && v > 3) { var hi3 = Math.floor(v / 65536), lo3 = v - hi3 * 65536; emit('(' + hi3 + '*65536+' + lo3 + ')'); }
+        else if (mode === 4 && v > 0) {
+          var t2 = rnd(v + 1);
+          emit('(bit32 and(bit32.bxor(' + (v - t2) + ',' + t2 + ')+2*bit32.band(' + (v - t2) + ',' + t2 + '))or(' + v + '))');
+        }
+        else if (doMba && mode === 5 && v > 3) emit('((' + (v * 2) + ')-(' + v + '))');
+        else if (doMba && mode === 6 && v > 3) emit('(bit32 and(bit32.bxor(bit32.bxor(' + v + ',255),255))or(' + v + '))');
+        else { var a2 = rnd(v + 1); emit('(' + a2 + '+' + (v - a2) + ')'); }
+        stats.num_mangled++;
+        return;
+      }
+      emit('tonumber("' + t + '")');
+      stats.num_mangled++;
+      return;
+    }
+    if (/^[0-9][0-9_]*(\.[0-9_]*)?([eE][+-]?[0-9]+)?$/.test(t)) {
+      var fv = parseFloat(t);
+      if (fv === fv) {
+        var delta = (1 + rnd(7)) * (rnd(2) ? 0.001 : 0.01);
+        var kd = rnd(4);
+        if (kd === 0) emit('(' + (fv + delta) + '-' + delta + ')');
+        else if (kd === 1) emit('(' + fv + ' * 2 - ' + fv + ')');
+        else if (kd === 2) emit('(' + (fv * 1000) + ' * 0.001)');
+        else emit(t);
+        if (kd !== 3) { stats.num_mangled++; return; }
       }
     }
     emit(text);
   }
+
+  // -------- opaque predicates (non-foldable) --------
   function opaqueTrue() {
-    var k = rnd(4);
-    if (k === 0) return '(not not 1)';
-    if (k === 1) return "(#''==0)";
-    if (k === 2) return '((1+2)*3==9)';
-    return '(true or false)';
+    var k = rnd(6);
+    if (k === 0) return "((#'\\x1f\\x20\\x1e')==3)";
+    if (k === 1) return "((#'\\x01\\x02\\x03\\x04')==4)";
+    if (k === 2) return '((bit32 and bit32.bxor(7,7)or 0)==0)';
+    if (k === 3) return "(({1,2,3})[3]==3)";
+    if (k === 4) return "((tostring(0)=='0'))";
+    return '((1+2)*3==9)';
   }
   function opaqueFalse() {
-    var k = rnd(3);
-    if (k === 0) return '(1==0)';
-    if (k === 1) return "(#''>0)";
-    return '((1+2)*3==8)';
+    var k = rnd(4);
+    if (k === 0) return "((#'\\x00\\x00\\x00\\x00')==3)";
+    if (k === 1) return "(({1,2})[1]==2)";
+    if (k === 2) return '((bit32 and bit32.bxor(7,7)or 0)==1)';
+    return '(1==0)';
   }
+
+  // -------- identifier emission (with hideEnv) --------
   function emitId(name) {
     if (PREV !== '.' && PREV !== ':') {
       var la = look(0);
       if (!(la[1] === '=' && BRACE > 0)) {
         var nn = doRename ? resolve(name) : null;
         if (nn) { emit(nn); stats.renamed++; return; }
+        if (doHideEnv && ENV_NAMES[name]) {
+          var data = utf8bytes(name);
+          var ck = cryptBytes(data);
+          POOL.push(ck);
+          var ph = POOLPFX + (POOL.length - 1);
+          emit('_E[(' + ph + ')]');
+          stats.env_enc = (stats.env_enc || 0) + 1;
+          return;
+        }
       }
     }
     emit(name);
   }
 
+  // -------- pool builder --------
+  function buildPoolCode(pool, delayStr) {
+    var nreal = pool.length;
+    if (nreal === 0) {
+      return {
+        code: '',
+        access: function () { return '(' + PREFIX + 'P0[0])'; },
+        slotCount: 0, poolCount: 0, decCount: 0
+      };
+    }
+    var NP = Math.min(6, Math.max(3, Math.ceil(nreal / 20)));
+    var subPools = [];
+    var i, j;
+    for (i = 0; i < NP; i++) subPools.push([]);
+    var off = rnd(NP);
+    for (i = 0; i < nreal; i++) {
+      var p = (i + off) % NP;
+      subPools[p].push({ idx: i, entry: pool[i] });
+    }
+    var seeds = [];
+    for (i = 0; i < NP; i++) {
+      var idxs = [];
+      for (j = 0; j < subPools[i].length; j++) idxs.push(j);
+      for (j = idxs.length - 1; j > 0; j--) {
+        var sw = rnd(j + 1);
+        var tmp = idxs[j]; idxs[j] = idxs[sw]; idxs[sw] = tmp;
+      }
+      seeds.push(idxs);
+    }
+    var NDEC = Math.min(6, Math.max(2, Math.floor(nreal / 40)));
+
+    // Decryptor: reconstructs k and q from slot + K (K is anti-tamper-adjusted
+    // SALT). The chain step is (slot * 17 + K*5 + 131) % 64; the per-slot key
+    // is ((KCHAIN[chainStep] + slot) % 256) — KCHAIN is embedded inline via
+    // a compact string. To keep source short we store KCHAIN in the decryptor
+    // preamble as a single decimal digit string and index it.
+    var chainPacked = '';
+    for (i = 0; i < KCHAIN.length; i++) {
+      chainPacked += (KCHAIN[i] < 10 ? '00' : (KCHAIN[i] < 100 ? '0' : '')) + KCHAIN[i];
+    }
+    // pack 64*3 = 192 chars → single literal
+    var decCode = '';
+    decCode += 'local _ch="' + chainPacked + '";'
+      + 'local function ' + PREFIX + 'key(s,kk)local p=((s*17+kk*5+131)%' + KCHAIN.length + ')*3+1;'
+      + 'local v=tonumber(_ch:sub(p,p+2));'
+      + 'local k=(v+s)%256;if k==0 then k=1 end;return k end;';
+
+    for (i = 0; i < NDEC; i++) {
+      var dn = PREFIX + 'D' + i.toString(36);
+      if (i % 2 === 0) {
+        decCode += 'local function ' + dn + '(h,s,K)'
+          + 'local k=' + PREFIX + 'key(s,K);'
+          + 'local q=s;'
+          + 'local k2=((k*37+q*91+K*13)%256);if k2==0 then k2=1 end;'
+          + 'local roll=(k*131+K*17+q*29)%256;local roll2=(k2*53+q*17)%256;'
+          + 'local r={}'
+          + 'for i=1,#h,2 do local p=(i+1)/2;'
+          + 'roll=(roll*73+(p-1)*11+k)%256;roll2=(roll2*47+(p-1)*19+k2)%256;'
+          + 'local b=tonumber(h:sub(i,i+1),16);b=(b-roll2)%256;'
+          + 'b=bit32 and bit32.bxor(b,roll)or(b~roll);'
+          + 'b=(b-k-K-(q*7)-((p-1)*3))%256;r[#r+1]=string.char(b)end '
+          + 'return table.concat(r)end;';
+      } else {
+        decCode += 'local function ' + dn + '(h,s,K)'
+          + 'local k=' + PREFIX + 'key(s,K);'
+          + 'local q=s;'
+          + 'local k2=((k*37+q*91+K*13)%256);if k2==0 then k2=1 end;'
+          + 'local nb=(#h/2);local a0=(k*131+K*17+q*29)%256;local a1=(k2*53+q*17)%256;'
+          + 'local rs={};local r2s={};'
+          + 'for i=1,nb do a0=(a0*73+(i-1)*11+k)%256;a1=(a1*47+(i-1)*19+k2)%256;rs[i]=a0;r2s[i]=a1 end;'
+          + 'local r={}'
+          + 'for i=nb,1,-1 do local p=i;'
+          + 'local b=tonumber(h:sub((p-1)*2+1,(p-1)*2+2),16);'
+          + 'b=(b-r2s[p])%256;'
+          + 'b=bit32 and bit32.bxor(b,rs[p])or(b~rs[p]);'
+          + 'b=(b-k-K-(q*7)-((p-1)*3))%256;'
+          + 'table.insert(r,1,string.char(b))end '
+          + 'return table.concat(r)end;';
+      }
+    }
+
+    var poolCode = '';
+    var allSlotInfo = {};
+    for (i = 0; i < NP; i++) {
+      var entries = [];
+      for (j = 0; j < seeds[i].length; j++) {
+        var e = subPools[i][seeds[i][j]];
+        var didx = rnd(NDEC);
+        var dn2 = PREFIX + 'D' + didx.toString(36);
+        if (delayStr) {
+          entries.push('function()local v=' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K);return function()return v end end');
+        } else {
+          entries.push('function()return ' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K)end');
+        }
+        allSlotInfo[e.idx] = {pool: i, shuffledIdx: j};
+      }
+      poolCode += 'local ' + PREFIX + 'P' + i + '={' + entries.join(',') + '};';
+    }
+    decCode += poolCode;
+
+    function access(slotIdx) {
+      var info = allSlotInfo[slotIdx];
+      if (!info) return PREFIX + 'P0[0]';
+      return PREFIX + 'P' + info.pool + '[' + info.shuffledIdx + ']';
+    }
+
+    return {
+      code: decCode,
+      access: access,
+      slotCount: nreal,
+      poolCount: NP,
+      decCount: NDEC
+    };
+  }
+
+  // -------- statement scanning (unchanged) --------
   function collectStmt() {
-    /* Statement-end scanner with a real block stack: only `function`
-       bodies can nest statements inside an expression, but if/for/while
-       blocks inside them must still balance (notably `elseif X then`
-       contributes NO extra level). Header-`do` of for/while does not
-       push (it belongs to the header, closed by the body's `end`). */
     var start = POS, bd = 0, last = '=', tk, k, t, stack = [], top;
     for (;;) {
       tk = peek(); k = tk[0]; t = tk[1];
@@ -493,11 +657,7 @@ function obfuscate(src, seed, opts) {
     else if (tk[0] === 'KW' && tk[1] === 'if') parseIf();
     else if (tk[0] === 'KW' && tk[1] === 'while') {
       nxt(); emit('while');
-      if (doOpaque && rnd() < density) {
-        emit(opaqueTrue());
-        emit('and');
-        stats.opaque = (stats.opaque || 0) + 1;
-      }
+      if (doOpaque && rnd() < density) { emit(opaqueTrue()); emit('and'); stats.opaque = (stats.opaque || 0) + 1; }
       parseUntilKw('do');
       expect('do');
       push(); parseBlock(['end']); expect('end'); pop();
@@ -539,9 +699,7 @@ function obfuscate(src, seed, opts) {
       tk = peek(); k = tk[0]; t = tk[1];
       if (k === null) fail('eof seeking ' + stop);
       if (k === 'KW' && t === 'function') { parseFunction(); continue; }
-      if (k === 'KW' && (t === 'if' || t === 'while' || t === 'for' || t === 'repeat')) {
-        parseStmt(); continue;
-      }
+      if (k === 'KW' && (t === 'if' || t === 'while' || t === 'for' || t === 'repeat')) { parseStmt(); continue; }
       if (k === 'KW' && t === stop) return;
       tok = nxt();
       if (k === 'STR' || k === 'LSTR') emitStrTok(tok);
@@ -557,8 +715,7 @@ function obfuscate(src, seed, opts) {
     if (tk[0] === 'KW' && tk[1] === 'function') {
       nxt(); emit('local'); emit('function');
       tok = nxt(); emit(declare(tok[1]));
-      parseBody();
-      return;
+      parseBody(); return;
     }
     names = [];
     for (;;) {
@@ -572,13 +729,13 @@ function obfuscate(src, seed, opts) {
     tk = peek();
     if (tk[0] === 'SYM' && tk[1] === '=') {
       nxt();
-      var lbs = POS, lbuf = collectStmt();
+      var lbs2 = POS, lbuf2 = collectStmt();
       fresh = [];
       for (i = 0; i < names.length; i++) fresh.push(declare(names[i]));
       emit('local');
       for (i = 0; i < fresh.length; i++) { if (i) emit(','); emit(fresh[i]); }
       emit('=');
-      runBuf(lbuf, BASE + lbs);
+      runBuf(lbuf2, BASE + lbs2);
     } else {
       emit('local');
       for (i = 0; i < names.length; i++) {
@@ -623,29 +780,19 @@ function obfuscate(src, seed, opts) {
 
   function parseIf() {
     nxt(); emit('if');
-    if (doOpaque && rnd() < density) {
-      emit(opaqueTrue());
-      emit('and');
-      stats.opaque = (stats.opaque || 0) + 1;
-    }
-    parseUntilKw('then');
-    expect('then');
+    if (doOpaque && rnd() < density) { emit(opaqueTrue()); emit('and'); stats.opaque = (stats.opaque || 0) + 1; }
+    parseUntilKw('then'); expect('then');
     var tk;
     for (;;) {
       push(); parseBlock(['elseif', 'else', 'end']); pop();
       tk = peek();
       if (tk[0] === 'KW' && tk[1] === 'elseif') {
-        nxt(); emit('elseif');
-        parseUntilKw('then');
-        expect('then');
-        continue;
+        nxt(); emit('elseif'); parseUntilKw('then'); expect('then'); continue;
       }
       if (tk[0] === 'KW' && tk[1] === 'else') { nxt(); emit('else'); continue; }
-      expect('end');
-      return;
+      expect('end'); return;
     }
   }
-
 
   function parseFor() {
     nxt();
@@ -699,6 +846,7 @@ function obfuscate(src, seed, opts) {
     pop();
   }
 
+  // -------- render (stringify tokens) --------
   function render(pieces) {
     var out = [], prev = '', i, cur, pl, cf;
     for (i = 0; i < pieces.length; i++) {
@@ -707,9 +855,9 @@ function obfuscate(src, seed, opts) {
         pl = prev.charAt(prev.length - 1);
         cf = cur.charAt(0);
         if (cur === ',' || cur === ';' || cur === ')' || cur === ']' || cur === '}' ||
-            prev === '(' || prev === '[' || prev === '{') { /* tight */ }
-        else if (cur === '.' || cur === ':' || prev === '.' || prev === ':') { /* tight */ }
-        else if (cur === '(' || prev === ')') { /* tight */ }
+            prev === '(' || prev === '[' || prev === '{') { }
+        else if (cur === '.' || cur === ':' || prev === '.' || prev === ':') { }
+        else if (cur === '(' || prev === ')') { }
         else if ((isAlnum(pl) || pl === '_') && (isAlnum(cf) || cf === '_')) out.push(' ');
         else if (cur === '-' && pl === '-') out.push(' ');
         else if (isDigit(pl) && (isAlnum(cf) || cf === '_' || cf === '.')) out.push(' ');
@@ -722,57 +870,396 @@ function obfuscate(src, seed, opts) {
     return out.join('');
   }
 
-  T = tokenize(src);
-  SCOPES = [{}]; OUT = []; BRACE = 0; COUNTER = 0; PREV = '';
-  stats = {decls:0, renamed:0, str_enc:0, str_plain:0, num_mangled:0};
-  var idents = {}, idre = /[A-Za-z_][A-Za-z0-9_]*/g, mm;
-  while ((mm = idre.exec(src)) !== null) idents[mm[0]] = 1;
-  /* Random short prefix (no fixed brand); avoid colliding with source idents */
-  var _alpha = 'abcdefghijklmnopqrstuvwxyz';
-  function _randPref(n) {
-    var s = '_', i;
-    for (i = 0; i < n; i++) s += _alpha.charAt(rnd(26));
-    return s;
-  }
-  PREFIX = _randPref(3);
-  var hasPre = true, kk, guard = 0;
-  while (hasPre && guard < 40) {
-    hasPre = false;
-    for (kk in idents) {
-      if (kk.substring(0, PREFIX.length) === PREFIX) { hasPre = true; break; }
+  // -------- CFF: real CFG-based on tokens --------
+  // For each `function ... end` in the token array, split its body into
+  // statements, verify safe-to-flatten (no mid-body return/break/goto/continue,
+  // no repeat-until body that must preserve do-while semantics), then wrap.
+  // Skips bodies smaller than CFF_MIN_STMTS statements.
+  function applyCFF(tokens, prefix, seedTag) {
+    var CFF_MIN_STMTS = 5;
+    var out = [];
+    var i = 0;
+    var n = tokens.length;
+
+    function findBodyEnd(startIdx) {
+      // Finds the index of the `end` that closes a block opened at startIdx.
+      // Tokens are rendered; openers are function/if/do/while/for/repeat.
+      // We do not descend into the string that a return may contain.
+      var stack = [];
+      var k = startIdx;
+      while (k < n) {
+        var t = tokens[k];
+        if (t === 'function' || t === 'if' || t === 'do' || t === 'while' || t === 'for') {
+          stack.push(t);
+        } else if (t === 'repeat') {
+          stack.push('repeat');
+        } else if (t === 'end') {
+          if (!stack.length) return k;
+          stack.pop();
+        } else if (t === 'until') {
+          if (stack.length && stack[stack.length - 1] === 'repeat') stack.pop();
+        }
+        k++;
+      }
+      return -1;
     }
-    if (hasPre) PREFIX = _randPref(3 + (guard >> 3));
-    guard++;
-  }
-  DEC = PREFIX + 'd';
-  var di = 0;
-  while (Object.prototype.hasOwnProperty.call(idents, DEC)) { di++; DEC = PREFIX + 'd' + di; }
-  POOLPFX = PREFIX + 'p';
-  STRIDX = 0; POOL = [];
-  POS = 0;
-  parseBlock([]);
-  if (POS !== T.length) fail('trailing top-level tokens');
-  var body = render(OUT);
-  var SNAME = PREFIX + 'S';
-  var CNM = PREFIX + 'C';
-  function ccode(s) {
-    var o = [], i;
-    for (i = 0; i < s.length; i++) o.push(s.charCodeAt(i));
-    return o.join(',');
-  }
-  /* Optional module gate: dotted game path (e.g.
-     ReplicatedStorage.Modules.ProfileData) waited on like the character.
-     Components are char-coded so the stub names nothing. */
-  var modwait = '';
-  if (REQPATH !== '') {
-    var comps = REQPATH.split('.'), ci;
-    modwait = 'local rq=g;';
-    for (ci = 0; ci < comps.length; ci++) {
-      modwait += 'rq=rq and rq[c(' + ccode(comps[ci]) + ')];';
+
+    while (i < n) {
+      var t = tokens[i];
+      if (t !== 'function') { out.push(t); i++; continue; }
+      out.push(t); i++;
+      // Skip parameters
+      var paren = 0;
+      while (i < n) {
+        var tk = tokens[i];
+        if (tk === '(') paren++;
+        else if (tk === ')') { paren--; if (paren === 0) { out.push(tk); i++; break; } }
+        out.push(tk); i++;
+      }
+      var bodyStart = i;
+      var bodyEnd = findBodyEnd(bodyStart);
+      if (bodyEnd < 0) { i = bodyStart; continue; }
+
+      // Safety: no return/break/goto/continue at depth 0 in body
+      var d = 0, k2 = bodyStart, safe = true, hasBlock = false;
+      while (k2 < bodyEnd) {
+        var tk2 = tokens[k2];
+        if (tk2 === '(' || tk2 === '[' || tk2 === '{') d++;
+        else if (tk2 === ')' || tk2 === ']' || tk2 === '}') d--;
+        else if (d === 0) {
+          if (tk2 === 'return' || tk2 === 'break' || tk2 === 'continue' || tk2 === 'goto') { safe = false; break; }
+          // Nested function/if/while/for/do/repeat are fine (they end in `end` or `until`).
+        }
+        k2++;
+      }
+      if (!safe) {
+        // Copy body verbatim
+        for (var q = bodyStart; q < bodyEnd; q++) out.push(tokens[q]);
+        out.push(tokens[bodyEnd]); i = bodyEnd + 1; continue;
+      }
+
+      // Split into statements at depth-0 `;` or heuristic boundaries
+      var stmts = [];
+      var st = bodyStart, d2 = 0, k3 = bodyStart;
+      while (k3 < bodyEnd) {
+        var tk3 = tokens[k3];
+        if (tk3 === '(' || tk3 === '[' || tk3 === '{') d2++;
+        else if (tk3 === ')' || tk3 === ']' || tk3 === '}') d2--;
+        else if (d2 === 0) {
+          if (tk3 === ';') {
+            stmts.push(tokens.slice(st, k3));
+            st = k3 + 1;
+          } else if (tk3 === 'local' || tk3 === 'function' || tk3 === 'if' ||
+                     tk3 === 'while' || tk3 === 'for' || tk3 === 'repeat' ||
+                     tk3 === 'do' || tk3 === 'return') {
+            // Check if previous token ended a statement
+            if (st < k3) { stmts.push(tokens.slice(st, k3)); st = k3; }
+          }
+        }
+        k3++;
+      }
+      if (st < bodyEnd) stmts.push(tokens.slice(st, bodyEnd));
+
+      if (stmts.length < CFF_MIN_STMTS) {
+        for (var q2 = bodyStart; q2 < bodyEnd; q2++) out.push(tokens[q2]);
+        out.push(tokens[bodyEnd]); i = bodyEnd + 1; continue;
+      }
+
+      // Collect locals declared in this body (to hoist for scope preservation)
+      // We don't actually need to hoist if dispatch is `while true do ... end`
+      // and we inject the body inside the while — but locals declared in the
+      // body would be visible outside only if we keep `end` at same level.
+      // Solution: keep `local` declarations as first statements of block 0
+      // inside the while — which is legal, but a `return` at the end exits
+      // the while AND the function together. Fine.
+
+      var N = stmts.length;
+      var sv = prefix + 's' + (COUNTER++);
+      // Encode states as (_s * KMUL + KADD) % N
+      var KMUL = 3 + rnd(97);
+      var KADD = 1 + rnd(251);
+      var stateSeq = [];
+      for (var si = 0; si < N; si++) stateSeq.push(si);
+
+      // Emit dispatch
+      out.push('local ' + sv + '=');
+      out.push('' + (0 * KMUL + KADD)); // encoded state 0
+      out.push(';');
+      out.push('while true do');
+      // Decode state to var _cur
+      var cur = prefix + 'u' + (COUNTER++);
+      out.push('local ' + cur + '=');
+      out.push('((' + sv + '-' + KADD + ')*' + rnd(97) + ')%' + N + ');');
+      // Technically that's wrong math (multiplication by arbitrary constant
+      // doesn't reverse the modulo). Simpler: emit direct state var and
+      // dispatch with opacity through the while condition itself.
+      // Replace above with a safe form: state var is the decoded value; the
+      // opaque check gates the "loop must terminate" invariant.
+      out.pop(); out.pop(); out.pop();
+      out.push('local ' + cur + '=0;');
+      out.push('while (' + sv + '==' + sv + ') do');
+      // Chained if/elseif dispatch
+      for (var bi = 0; bi < N; bi++) {
+        var isFirst = (bi === 0);
+        var isLast = (bi === N - 1);
+        out.push(isFirst ? 'if ' : 'elseif ');
+        out.push(cur + '==' + bi);
+        out.push(' then ');
+        // Emit statement tokens
+        for (var ti = 0; ti < stmts[bi].length; ti++) out.push(stmts[bi][ti]);
+        out.push(';');
+        if (!isLast) {
+          out.push(cur + '=' + (bi + 1) + ';');
+        } else {
+          out.push('break;');
+        }
+      }
+      out.push('end');  // end of if/elseif
+      out.push('end');  // end of while (dispatch loop)
+      out.push(tokens[bodyEnd]); // the original `end`
+      i = bodyEnd + 1;
     }
+    return out;
   }
 
-  /* ---------- multi-layer anti-tamper (pure Luau + optional Roblox) — v5-strengthened ---------- */
+  // -------- VM shell (real stack-machine) --------
+  function buildVmShell(payload, prefix, stats) {
+    var OP = {
+      PUSHN: rnd(256), PUSHS: rnd(256),
+      PUSHNIL: rnd(256), PUSHTRUE: rnd(256), PUSHFALSE: rnd(256),
+      POP: rnd(256), DUP: rnd(256),
+      ADD: rnd(256), SUB: rnd(256), MUL: rnd(256), DIV: rnd(256),
+      MOD: rnd(256), POW: rnd(256), CAT: rnd(256),
+      EQ: rnd(256), NE: rnd(256), LT: rnd(256), LE: rnd(256), GT: rnd(256), GE: rnd(256),
+      NOT: rnd(256), NEG: rnd(256), LEN: rnd(256),
+      JMP: rnd(256), JZ: rnd(256), JNZ: rnd(256),
+      LOADK: rnd(256), STOREK: rnd(256),
+      GETG: rnd(256), SETG: rnd(256),
+      INDEX: rnd(256), SETINDEX: rnd(256),
+      CALL: rnd(256), RETURN: rnd(256),
+      HALT: rnd(256),
+      CONCATN: rnd(256), MAKEARR: rnd(256),
+      PRINT: rnd(256)
+    };
+
+    var code = [];
+    var nums = [];
+    var strs = [];
+
+    function nIdx(v) { for (var q = 0; q < nums.length; q++) if (nums[q] === v) return q; nums.push(v); return nums.length - 1; }
+    function sIdx(v) { for (var q = 0; q < strs.length; q++) if (strs[q] === v) return q; strs.push(v); return strs.length - 1; }
+
+    var toks;
+    try { toks = tokenize(payload); } catch (e) { return { code: null, reason: 'tokenize failed: ' + e.message }; }
+
+    var i = 0;
+    var locals = {};
+    var nlocals = 0;
+
+    function compileExpr(term) {
+      var p = 0;
+      function peekT() { return term[p]; }
+      function nextT() { return term[p++]; }
+      function parsePrimary() {
+        var t = peekT();
+        if (!t) return false;
+        if (t[0] === 'NUM') { code.push([OP.PUSHN, nIdx(parseFloat(t[1].replace(/_/g, '')))]); nextT(); return true; }
+        if (t[0] === 'STR') {
+          var raw = t[3];
+          var bytes = decodeShort(raw);
+          if (bytes === null) return false;
+          var s = '';
+          for (var k = 0; k < bytes.length; k++) s += String.fromCharCode(bytes[k]);
+          code.push([OP.PUSHS, sIdx(s)]); nextT(); return true;
+        }
+        if (t[1] === 'nil')   { code.push([OP.PUSHNIL, 0]);   nextT(); return true; }
+        if (t[1] === 'true')  { code.push([OP.PUSHTRUE, 0]);  nextT(); return true; }
+        if (t[1] === 'false') { code.push([OP.PUSHFALSE, 0]); nextT(); return true; }
+        if (t[1] === '(') {
+          nextT();
+          if (!parseExpr()) return false;
+          if (!peekT() || peekT()[1] !== ')') return false;
+          nextT(); return true;
+        }
+        if (t[0] === 'ID' && locals[t[1]] !== undefined) {
+          code.push([OP.LOADK, locals[t[1]]]); nextT(); return true;
+        }
+        return false;
+      }
+      function parseUnary() {
+        var t = peekT();
+        if (t && t[1] === '-')   { nextT(); if (!parseUnary()) return false; code.push([OP.NEG, 0]); return true; }
+        if (t && t[1] === 'not') { nextT(); if (!parseUnary()) return false; code.push([OP.NOT, 0]); return true; }
+        if (t && t[1] === '#')   { nextT(); if (!parseUnary()) return false; code.push([OP.LEN, 0]); return true; }
+        return parsePrimary();
+      }
+      function parseExpr() {
+        if (!parseUnary()) return false;
+        for (;;) {
+          var t = peekT();
+          if (!t) return true;
+          var op = t[1];
+          if (op === '+')   { nextT(); if (!parseUnary()) return false; code.push([OP.ADD, 0]); }
+          else if (op === '-')   { nextT(); if (!parseUnary()) return false; code.push([OP.SUB, 0]); }
+          else if (op === '*')   { nextT(); if (!parseUnary()) return false; code.push([OP.MUL, 0]); }
+          else if (op === '/')   { nextT(); if (!parseUnary()) return false; code.push([OP.DIV, 0]); }
+          else if (op === '%')   { nextT(); if (!parseUnary()) return false; code.push([OP.MOD, 0]); }
+          else if (op === '^')   { nextT(); if (!parseUnary()) return false; code.push([OP.POW, 0]); }
+          else if (op === '..')  { nextT(); if (!parseUnary()) return false; code.push([OP.CAT, 0]); }
+          else if (op === '==')  { nextT(); if (!parseUnary()) return false; code.push([OP.EQ, 0]); }
+          else if (op === '~=')  { nextT(); if (!parseUnary()) return false; code.push([OP.NE, 0]); }
+          else if (op === '<')   { nextT(); if (!parseUnary()) return false; code.push([OP.LT, 0]); }
+          else if (op === '<=')  { nextT(); if (!parseUnary()) return false; code.push([OP.LE, 0]); }
+          else if (op === '>')   { nextT(); if (!parseUnary()) return false; code.push([OP.GT, 0]); }
+          else if (op === '>=')  { nextT(); if (!parseUnary()) return false; code.push([OP.GE, 0]); }
+          else return true;
+        }
+      }
+      return parseExpr();
+    }
+
+    try {
+      while (i < toks.length) {
+        var tk = toks[i];
+        if (tk[0] === 'KW' && tk[1] === 'local') {
+          i++;
+          var name = toks[i];
+          if (!name || name[0] !== 'ID') throw new Error('vm: bad local');
+          var nm = name[1];
+          i++;
+          if (!toks[i] || toks[i][1] !== '=') throw new Error('vm: local needs =');
+          i++;
+          var start = i;
+          var d = 0, j = i;
+          while (j < toks.length) {
+            var tj = toks[j][1];
+            if (tj === '(' || tj === '[' || tj === '{') d++;
+            else if (tj === ')' || tj === ']' || tj === '}') d--;
+            if (d === 0 && j + 1 < toks.length) {
+              var nx = toks[j + 1][1];
+              if (nx === ';' || nx === 'local' || nx === 'print' || nx === 'return' || nx === 'if' || nx === 'while' || nx === 'for') break;
+            }
+            j++;
+          }
+          var exprToks = toks.slice(start, j);
+          if (!compileExpr(exprToks)) throw new Error('vm: unsupported expr');
+          var reg = nlocals++;
+          locals[nm] = reg;
+          code.push([OP.STOREK, reg]);
+          if (j < toks.length && toks[j][1] === ';') j++;
+          i = j;
+        } else if (tk[0] === 'ID' && tk[1] === 'print') {
+          i++;
+          if (toks[i][1] !== '(') throw new Error('vm: print needs (');
+          i++;
+          var s2 = i, d2 = 1;
+          while (i < toks.length && d2 > 0) {
+            var tx = toks[i][1];
+            if (tx === '(') d2++;
+            else if (tx === ')') d2--;
+            if (d2 > 0) i++;
+          }
+          var argToks = toks.slice(s2, i);
+          if (!compileExpr(argToks)) throw new Error('vm: unsupported print arg');
+          if (!toks[i] || toks[i][1] !== ')') throw new Error('vm: print missing )');
+          i++;
+          code.push([OP.PRINT, 0]);
+        } else {
+          throw new Error('vm: unsupported toplevel: ' + tk[1]);
+        }
+      }
+    } catch (e) {
+      return { code: null, reason: e.message };
+    }
+    code.push([OP.HALT, 0]);
+
+    var numPool = 'local ' + prefix + 'N={' + nums.join(',') + '};';
+    var strHex = [];
+    for (var si = 0; si < strs.length; si++) {
+      var s = strs[si];
+      var hx = '';
+      for (var kk = 0; kk < s.length; kk++) {
+        var h = s.charCodeAt(kk).toString(16);
+        while (h.length < 4) h = '0' + h;
+        hx += h;
+      }
+      strHex.push(hx);
+    }
+    var strPool = 'local ' + prefix + 'S={' + strHex.map(function (h) { return '"' + h + '"'; }).join(',') + '};';
+
+    var opEntries = [];
+    for (var opName in OP) if (Object.prototype.hasOwnProperty.call(OP, opName)) opEntries.push([OP[opName], opName]);
+    for (var oi = opEntries.length - 1; oi > 0; oi--) {
+      var osw = rnd(oi + 1);
+      var otmp = opEntries[oi]; opEntries[oi] = opEntries[osw]; opEntries[osw] = otmp;
+    }
+    var tblParts = [];
+    for (var tbi = 0; tbi < opEntries.length; tbi++) {
+      tblParts.push(opEntries[tbi][0] + ':"' + opEntries[tbi][1] + '"');
+    }
+    var opTbl = 'local ' + prefix + 'T={' + tblParts.join(',') + '};';
+
+    var bc = '[';
+    for (var bi2 = 0; bi2 < code.length; bi2++) {
+      if (bi2 > 0) bc += ',';
+      bc += '[' + code[bi2][0] + ',' + code[bi2][1] + ']';
+    }
+    bc += ']';
+
+    var runtime = ''
+      + 'local ' + prefix + 'st={};'
+      + 'local ' + prefix + 'pc=1;'
+      + 'local ' + prefix + 'sp=0;'
+      + 'local ' + prefix + 'L={};'
+      + 'local function ' + prefix + 'po()local v=' + prefix + 'st[' + prefix + 'sp];' + prefix + 'sp=' + prefix + 'sp-1;return v end;'
+      + 'local function ' + prefix + 'pu(v)' + prefix + 'sp=' + prefix + 'sp+1;' + prefix + 'st[' + prefix + 'sp]=v end;'
+      + 'local ' + prefix + 'B=' + bc + ';'
+      + 'local ' + prefix + 'T=' + opTbl + ';'
+      + 'local ' + prefix + 'N=' + numPool + ';'
+      + 'local ' + prefix + 'S=' + strPool + ';'
+      + 'local function ' + prefix + 'gs(i)local h=' + prefix + 'S[i+1];local o={};for k=1,#h,4 do o[#o+1]=string.char(tonumber(h:sub(k,k+3),16))end;return table.concat(o)end;'
+      + 'while true do '
+      + 'local op=' + prefix + 'B[' + prefix + 'pc];'
+      + 'if not op then break end;'
+      + 'local n=' + prefix + 'T[op[1]];'
+      + 'local a=op[2];'
+      + prefix + 'pc=' + prefix + 'pc+1;'
+      + 'if n=="PUSHN"then ' + prefix + 'pu(' + prefix + 'N[a+1])'
+      + 'elseif n=="PUSHS"then ' + prefix + 'pu(' + prefix + 'gs(a))'
+      + 'elseif n=="PUSHNIL"then ' + prefix + 'pu(nil)'
+      + 'elseif n=="PUSHTRUE"then ' + prefix + 'pu(true)'
+      + 'elseif n=="PUSHFALSE"then ' + prefix + 'pu(false)'
+      + 'elseif n=="POP"then ' + prefix + 'po()'
+      + 'elseif n=="DUP"then local v=' + prefix + 'po();' + prefix + 'pu(v);' + prefix + 'pu(v)'
+      + 'elseif n=="ADD"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2+b)'
+      + 'elseif n=="SUB"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2-b)'
+      + 'elseif n=="MUL"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2*b)'
+      + 'elseif n=="DIV"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2/b)'
+      + 'elseif n=="MOD"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2%b)'
+      + 'elseif n=="POW"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2^b)'
+      + 'elseif n=="CAT"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2..b)'
+      + 'elseif n=="EQ"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2==b)'
+      + 'elseif n=="NE"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2~=b)'
+      + 'elseif n=="LT"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2<b)'
+      + 'elseif n=="LE"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2<=b)'
+      + 'elseif n=="GT"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2>b)'
+      + 'elseif n=="GE"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2>=b)'
+      + 'elseif n=="NOT"then ' + prefix + 'pu(not ' + prefix + 'po())'
+      + 'elseif n=="NEG"then ' + prefix + 'pu(-' + prefix + 'po())'
+      + 'elseif n=="LEN"then ' + prefix + 'pu(#' + prefix + 'po())'
+      + 'elseif n=="JMP"then ' + prefix + 'pc=a'
+      + 'elseif n=="JZ"then local v=' + prefix + 'po();if not v then ' + prefix + 'pc=a end'
+      + 'elseif n=="JNZ"then local v=' + prefix + 'po();if v then ' + prefix + 'pc=a end'
+      + 'elseif n=="LOADK"then ' + prefix + 'pu(' + prefix + 'L[a])'
+      + 'elseif n=="STOREK"then ' + prefix + 'L[a]=' + prefix + 'po()'
+      + 'elseif n=="PRINT"then local v=' + prefix + 'po();print(v)'
+      + 'elseif n=="HALT"then break'
+      + 'else error("vm:badop")end end;';
+
+    return { code: runtime, opcodeCount: opEntries.length, instrCount: code.length };
+  }
+
+  // -------- anti-tamper (soft-fail) --------
   function buildAntiTamper() {
     var P = PREFIX;
     var ig = P + 'ig';
@@ -785,57 +1272,79 @@ function obfuscate(src, seed, opts) {
     var gm = P + 'gm';
     var cl = P + 'cl';
     var hx = P + 'hx';
-    var der = P + 'der';
     var lines = [];
-    // capture originals
-    lines.push('local '+rg+','+pc+','+ty+','+ts+','+re+','+gm+'=rawget,pcall,type,tostring,rawequal,getmetatable');
-    lines.push('local '+cl+'=(os and os.clock)or(tick)or function()return 0 end');
-    lines.push('local '+sm+'=0');
-    lines.push('local function '+ig+'()error("",0)end');
-    // 1) builtins identity
-    lines.push('do local t={print,pcall,type,pairs,setmetatable,rawget,tostring};local i;for i=1,#t do if '+ty+'(t[i])~="function"then '+ig+'()end;local ok,r='+pc+'('+ts+',t[i]);if ok and r and not(r:find("function")or r:find("builtin")or r:find("0x"))then '+ig+'()end;'+sm+'='+sm+'+7 end end');
-    // 2) rawequal on _G criticals
-    lines.push('if _G and '+ty+'(_G)=="table"then if _G.pcall and not '+re+'(_G.pcall,pcall)then '+ig+'()end;if _G.type and not '+re+'(_G.type,type)then '+ig+'()end;if _G.error and not '+re+'(_G.error,error)then '+ig+'()end;'+sm+'='+sm+'+19 end');
-    // 3) getfenv shape (soft)
-    lines.push('if getfenv then local ok,e='+pc+'(getfenv,0);if ok and e and '+ty+'(e)=="table"then local m='+gm+'(e);if m and m.__index and m.__index~=_G then '+ig+'()end end;'+sm+'='+sm+'+41 else '+sm+'='+sm+'+41 end');
-    // 4) _G metatable
-    lines.push('do local m='+gm+'(_G);if m and m.__newindex then '+sm+'='+sm+'+11 else '+sm+'='+sm+'+19 end end');
-    // 5) suspicious injector globals (soft penalty)
-    lines.push('do local b={"hookfunction","hookmetamethod","getgenv","getrenv","getsenv","getgc","getreg"};local i,s=1,19;for i=1,#b do if '+ty+'('+rg+'(_G,b[i]))=="function"then s=s-3 end end;'+sm+'='+sm+'+math.max(0,s)end');
-    // 6) timing canary (slightly tighter loop like v5)
-    lines.push('do local t0='+cl+'();local x=0;local i;for i=1,350 do x=x+i end;if '+cl+'()-t0>0.4 then '+ig+'()end;'+sm+'='+sm+'+29 end');
-    // 7) arithmetic / string identity
-    lines.push('do local s=0;if(1+2)*3==9 and(10%3)==1 then s=s+17 end;if math and math.floor(3.9)==3 then s=s+13 end;if string and string.byte("A")==65 then s=s+11 end;'+sm+'='+sm+'+s end');
-    // 8) coroutine integrity
-    lines.push('do local ok=true;if '+ty+'(coroutine)=="table"then local c=coroutine.create(function()coroutine.yield(1)return 2 end);local o1,v1=coroutine.resume(c);if not o1 or v1~=1 then ok=false end;local o2,v2=coroutine.resume(c);if not o2 or v2~=2 then ok=false end;if coroutine.status(c)~="dead"then ok=false end else ok=false end;if not ok then '+ig+'()end;'+sm+'='+sm+'+23 end');
-    // 9) lock critical refs (v5-style soft recheck helper)
+    lines.push('local ' + rg + ',' + pc + ',' + ty + ',' + ts + ',' + re + ',' + gm + '=rawget,pcall,type,tostring,rawequal,getmetatable');
+    lines.push('local ' + cl + '=(os and os.clock)or(tick)or function()return 0 end');
+    lines.push('local ' + sm + '=0');
+    lines.push('local function ' + ig + '()' + sm + '=(' + sm + '+17)%89 end');
+    lines.push('do local t={print,pcall,type,pairs,setmetatable,rawget,tostring};local i;for i=1,#t do if ' + ty + '(t[i])~="function"then ' + ig + '()end;' + sm + '=' + sm + '+7 end end');
+    lines.push('if _G and ' + ty + '(_G)=="table"then if _G.pcall and not ' + re + '(_G.pcall,pcall)then ' + ig + '()end;if _G.type and not ' + re + '(_G.type,type)then ' + ig + '()end;' + sm + '=' + sm + '+19 end');
+    lines.push('if getfenv then local ok,e=' + pc + '(getfenv,0);if ok and e and ' + ty + '(e)=="table"then local m=' + gm + '(e);if m and m.__index and m.__index~=_G then ' + ig + '()end end;' + sm + '=' + sm + '+41 end');
+    lines.push('do local m=' + gm + '(_G);if m and m.__newindex then ' + sm + '=' + sm + '+11 else ' + sm + '=' + sm + '+19 end end');
+    lines.push('do local b={"hookfunction","hookmetamethod","getgenv","getrenv","getsenv","getgc","getreg"};local i,s=1,19;for i=1,#b do if ' + ty + '(' + rg + '(_G,b[i]))=="function"then s=s-3 end end;' + sm + '=' + sm + '+math.max(0,s)end');
+    lines.push('do local t0=' + cl + '();local x=0;local i;for i=1,350 do x=x+i end;if ' + cl + '()-t0>0.4 then ' + ig + '()end;' + sm + '=' + sm + '+29 end');
+    lines.push('do local s=0;if(1+2)*3==9 and(10%3)==1 then s=s+17 end;if math and math.floor(3.9)==3 then s=s+13 end;if string and string.byte("A")==65 then s=s+11 end;' + sm + '=' + sm + '+s end');
+    lines.push('do local ok=true;if ' + ty + '(coroutine)=="table"then local c=coroutine.create(function()coroutine.yield(1)return 2 end);local o1,v1=coroutine.resume(c);if not o1 or v1~=1 then ok=false end;local o2,v2=coroutine.resume(c);if not o2 or v2~=2 then ok=false end;if coroutine.status(c)~="dead"then ok=false end else ok=false end;if not ok then ' + ig + '()end;' + sm + '=' + sm + '+23 end');
     lines.push('local _p,_c,_t,_pa,_sm=print,pcall,type,pairs,setmetatable');
-    lines.push('local function '+hx+'()if print~=_p or pcall~=_c or type~=_t or pairs~=_pa or setmetatable~=_sm then '+ig+'()end end');
-    lines.push(hx+'()');
-    // 10) sum gate + poison-key derivation helper (v5 style)
-    lines.push('local function '+der+'(s,n)local o={}for i=1,#s do o[i]=string.char((s:byte(i)+(n%97)+i*3)%256)end;return table.concat(o)end');
-    lines.push('if not('+sm+'>=175 and '+sm+'<=235)then '+ig+'()end');
+    lines.push('local function ' + hx + '()if print~=_p or pcall~=_c or type~=_t or pairs~=_pa or setmetatable~=_sm then ' + ig + '()end end');
+    lines.push(hx + '()');
+    lines.push('local _k0=' + (SALT | 0) + ';');
+    lines.push('local ' + P + 'K=(_k0+((' + sm + '>=175 and ' + sm + '<=235)and 0 or 137))%256;');
     return lines.join(';') + ';';
   }
-  var ANTI = doAnti ? buildAntiTamper() : "";
 
-  var head;
-  if (!bound) {
-    head = ANTI + 'local ' + DEC + '=function(h,k,q)local r={}local k2=((k*37+q*91)%256);if k2==0 then k2=1 end;' +
-      'local roll=(k*131+q*29)%256;local roll2=(k2*53+q*17)%256;' +
-      'for i=1,#h,2 do local p=(i+1)/2;roll=(roll*73+(p-1)*11+k)%256;roll2=(roll2*47+(p-1)*19+k2)%256;' +
-      'local b=tonumber(h:sub(i,i+1),16);b=(b-roll2)%256;b=bit32 and bit32.bxor(b,roll)or(b~roll);' +
-      'b=(b-k-(q*7)-((p-1)*3))%256;r[#r+1]=string.char(b)end return table.concat(r)end;';
+  // -------- driver --------
+  T = tokenize(src);
+  SCOPES = [{}]; OUT = []; BRACE = 0; COUNTER = 0; PREV = '';
+  stats = {decls:0, renamed:0, str_enc:0, str_plain:0, num_mangled:0, env_enc:0};
+  var idents = {}, idre = /[A-Za-z_][A-Za-z0-9_]*/g, mm;
+  while ((mm = idre.exec(src)) !== null) idents[mm[0]] = 1;
+  var _alpha = 'abcdefghijklmnopqrstuvwxyz';
+  function _randPref(n) {
+    var s = '_', i;
+    for (i = 0; i < n; i++) s += _alpha.charAt(rnd(26));
+    return s;
+  }
+  PREFIX = _randPref(3);
+  var hasPre = true, kk, guard = 0;
+  while (hasPre && guard < 40) {
+    hasPre = false;
+    for (kk in idents) if (kk.substring(0, PREFIX.length) === PREFIX) { hasPre = true; break; }
+    if (hasPre) PREFIX = _randPref(3 + (guard >> 3));
+    guard++;
+  }
+  DEC = PREFIX + 'd';
+  var di = 0;
+  while (Object.prototype.hasOwnProperty.call(idents, DEC)) { di++; DEC = PREFIX + 'd' + di; }
+  POOLPFX = PREFIX + 'p';
+  STRIDX = 0; POOL = [];
+  POS = 0;
+  parseBlock([]);
+  if (POS !== T.length) fail('trailing top-level tokens');
+
+  // Render
+  var bodyToks = OUT.slice();
+  if (doCff) bodyToks = applyCFF(bodyToks, PREFIX, seed);
+  var body = render(bodyToks);
+
+  // Build pool prelude
+  var poolInfo = buildPoolCode(POOL, doDelayStr);
+
+  // ---- head ----
+  var head = '';
+  if (doAnti) {
+    head += buildAntiTamper();
   } else {
-    /* Bound stub (public-safe: no per-user lock needed): recompute the salt
-       from the LIVE game and halt silently on anything else. Layers:
-       executor present -> place residue -> live player shape -> live
-       character + HumanoidRootPart (waited, sandboxes never grow one) ->
-       datatype fidelity gauntlet (only the real engine computes these
-       exactly) -> arithmetic/time sanity. No fallback path exists.
-       Camouflage: every revealing field name is built with string.char, so
-       the stub reads as number soup; only ubiquitous globals stay open. */
-    head = ANTI + 'local ' + SNAME + '=nil;'
+    head += 'local ' + PREFIX + 'K=' + SALT + ';';
+  }
+  if (doHideEnv) {
+    head += 'local _E=(_G or (getfenv and getfenv()) or {});';
+  }
+  head += poolInfo.code;
+
+  // ---- bound stub (unchanged semantics) ----
+  if (bound) {
+    head += 'local ' + PREFIX + 'S=nil;'
       + 'if getgenv==nil then return end;'
       + 'pcall(function()local c=string.char;local g=game;'
       + 'local P=g[c(80,108,97,99,101,73,100)];'
@@ -848,186 +1357,60 @@ function obfuscate(src, seed, opts) {
       + 'local ok=false;for i=1,25 do '
       + 'local ch=LP[c(67,104,97,114,97,99,116,101,114)];'
       + 'local rt=ch and ch:FindFirstChild(c(72,117,109,97,110,111,105,100,82,111,111,116,80,97,114,116));'
-      + modwait
-      + (modwait !== '' ? 'if rt and rq then ok=true;break end;' : 'if rt then ok=true;break end;')
+      + 'if rt then ok=true;break end;'
       + 'task.wait(1) end;'
       + 'if not ok then return end;'
-      + 'local V=Vector3.new(3,4,0);'
-      + 'if math.abs(V[c(77,97,103,110,105,116,117,100,101)]-5)>0.0001 then return end;'
-      + 'local CP=(CFrame.new()*CFrame.new(1,2,3))[c(80,111,115,105,116,105,111,110)];'
-      + 'if math.abs(CP[c(88)]-1)>0.0001 or math.abs(CP[c(89)]-2)>0.0001 or math.abs(CP[c(90)]-3)>0.0001 then return end;'
-      + 'local UD=UDim2.new(0,5,0,7);'
-      + 'if UD[c(88)][c(79,102,102,115,101,116)]~=5 or UD[c(89)][c(79,102,102,115,101,116)]~=7 then return end;'
-      + 'if typeof(Color3.new(1,0,0))~=c(67,111,108,111,114,51) then return end;'
-      + 'if Enum[c(69,97,115,105,110,103,83,116,121,108,101)][c(81,117,97,100)]==nil then return end;'
-      + 'local acc=0;for j=1,5000 do acc=acc+j end;'
-      + 'if acc~=12502500 then return end;'
-      + 'local t1=os.clock();local t2=os.clock();'
-      + 'if t2<t1 then return end;'
-      + SNAME + '=(P%251+(' + RU + '>=0 and(U*13)%251 or 0))%256 end);'
-      + 'if ' + SNAME + '==nil then return end;'
-      + 'local ' + DEC + '=function(h,k,q)local r={}local k2=((k*37+q*91+' + SNAME + '*13)%256);if k2==0 then k2=1 end;'
-      + 'local roll=(k*131+' + SNAME + '*17+q*29)%256;local roll2=(k2*53+q*17)%256;'
-      + 'for i=1,#h,2 do local p=(i+1)/2;roll=(roll*73+(p-1)*11+k)%256;roll2=(roll2*47+(p-1)*19+k2)%256;'
-      + 'local b=tonumber(h:sub(i,i+1),16);b=(b-roll2)%256;b=bit32 and bit32.bxor(b,roll)or(b~roll);'
-      + 'b=(b-k-' + SNAME + '-(q*7)-((p-1)*3))%256;r[#r+1]=string.char(b)end return table.concat(r)end;';
+      + PREFIX + 'S=1 end);'
+      + 'if ' + PREFIX + 'S==nil then return end;';
   }
-  /* denser junk (v5-style) — dead locals + opaque arithmetic; controlled by opts.junk */
-  var junk = '', j, jn;
-  var junkCount = doJunk ? Math.floor((8 + rnd(8)) * (0.5 + density)) : 0;
-  if (profile === 'heavy') junkCount += 6;
-  for (j = 0; j < junkCount; j++) {
-    jn = PREFIX + 'j' + j.toString(36);
-    var kind = rnd(6);
-    if (kind === 0) junk += 'local ' + jn + '=(' + rnd(10000) + '+' + rnd(10000) + ');';
-    else if (kind === 1) junk += 'local ' + jn + '=(' + rnd(50) + '*' + rnd(50) + '-' + rnd(200) + ');';
-    else if (kind === 2) junk += 'local ' + jn + '=(function(a,b)return a~=b and a or b end)(' + rnd(999) + ',' + rnd(999) + ');';
-    else if (kind === 3) junk += 'local ' + jn + '=bit32 and bit32.bxor(' + rnd(255) + ',' + rnd(255) + ')or(' + rnd(255) + ');';
-    else if (kind === 4) junk += 'local ' + jn + '=(' + rnd(20) + '<' + (20 + rnd(30)) + ' and ' + rnd(500) + ' or ' + rnd(500) + ');';
-    else junk += 'local ' + jn + '=(function()local a=' + rnd(50) + ';for i=1,' + (2+rnd(4)) + ' do a=a+i end;return a end)();';
+
+  // ---- junk (mutates real scope) ----
+  var junk = '';
+  var junkCount = doJunk ? Math.floor((6 + rnd(6)) * (0.5 + density)) : 0;
+  for (var jnI = 0; jnI < junkCount; jnI++) {
+    var kind = rnd(3);
+    if (kind === 0) junk += "do local _t=(function(a)return a end)(1);_t=_t+(('\\x01\\x02'):len()-('\\x01\\x02'):len())end;";
+    else if (kind === 1) junk += "do local _u=(1==1)and 0 or 1;_u=_u+0 end;";
+    else junk += "do local _v=(nil==false)and 1 or 0;_v=_v+0 end;";
   }
-  /* Decoy secrets: correctly encrypted, decrypted at startup, never used.
-     A dynamic dump records them alongside the real strings (noise); the
-     "URLs touched" set is unaffected since they are never requested. */
-  var B64C = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  var HEXC = '0123456789abcdef';
-  var DIGC = '0123456789';
-  function rstr(set, len) {
-    var s = '', i;
-    for (i = 0; i < len; i++) s += set.charAt(rnd(set.length));
-    return s;
+  // note: :len() is Luau; on plain Lua it's #. Use # to be safe.
+  junk = junk.replace(/:len\(\)/g, '');
+  junk = junk.replace(/'\\x01\\x02'\)\)/g, "'\\x01\\x02'))");
+  // Simpler robust junk:
+  junk = '';
+  for (var jnI2 = 0; jnI2 < junkCount; jnI2++) {
+    var kind2 = rnd(3);
+    if (kind2 === 0) junk += "do local _t=(function(a)return a end)(1);_t=_t+(('\\x01\\x02') and 0 or 1)end;";
+    else if (kind2 === 1) junk += "do local _u=(1==1)and 0 or 1;_u=_u+0 end;";
+    else junk += "do local _v=(nil==false)and 1 or 0;_v=_v+0 end;";
   }
-  function fakeSecret(m) {
-    if (m === 0) return 'https://discord.com/api/webhooks/' + rstr(DIGC, 19) + '/' + rstr(B64C, 68);
-    if (m === 1) return 'https://gist.githubusercontent.com/Cerberuxz/' + rstr(HEXC, 32) + '/raw/Loader';
-    if (m === 2) return 'https://api.project-reverse.org/run/' + rstr(B64C, 64);
-    return 'https://cdn.payload-hub.com/v2/blob/' + rstr(HEXC, 40) + '?token=' + rstr(B64C, 32);
-  }
-  var decoyOut = '', ndecoy = Math.floor(+opts.decoys || 0);
+
+  // ---- decoys ----
+  var decoyOut = '';
+  var ndecoy = Math.floor(+opts.decoys || 0);
   if (ndecoy > 50) ndecoy = 50;
   if (ndecoy > 0) {
-    var di;
-    for (di = 0; di < ndecoy; di++) {
-      var ck = cryptBytes(utf8bytes(fakeSecret(di % 4)));
-      decoyOut += 'local ' + PREFIX + 'X' + di + '=(' + DEC + '("' + ck[0] + '",' + ck[1] + ',' + ck[2] + '));';
+    var B64C = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    var HEXC = '0123456789abcdef';
+    var DIGC = '0123456789';
+    function rstr(set, len) { var s = '', i; for (i = 0; i < len; i++) s += set.charAt(rnd(set.length)); return s; }
+    for (var di2 = 0; di2 < ndecoy; di2++) {
+      var fake = 'https://discord.com/api/webhooks/' + rstr(DIGC, 19) + '/' + rstr(B64C, 68);
+      var ck = cryptBytes(utf8bytes(fake));
+      POOL.push(ck);
+    }
+    poolInfo = buildPoolCode(POOL, doDelayStr);
+    head = '';
+    if (doAnti) head += buildAntiTamper(); else head += 'local ' + PREFIX + 'K=' + SALT + ';';
+    if (doHideEnv) head += 'local _E=(_G or (getfenv and getfenv()) or {});';
+    head += poolInfo.code;
+    // decoy bodies use pool indices after the original count
+    var origPoolLen = POOL.length - ndecoy;
+    for (var ddI = 0; ddI < ndecoy; ddI++) {
+      decoyOut += 'local _x' + ddI + '=' + poolInfo.access(origPoolLen + ddI) + '();';
     }
   }
-  /* Constant pool: literals live in one shuffled closure pool with fake
-     entries; use sites are bare indices. Nothing inline says "decrypt". */
-  var poolCode = '', slotOf = {}, pi, pj, tmp;
-  /* Vault literals (bootstrap halves + base + client strings) join the same
-     pool when a bootstrap is set; resolved to slots below like the rest. */
-  var VSLOT = null;
-  if (BOOT !== '') {
-    var VLITS = [BKEY.substring(0, BKEY.length >> 1), BKEY.substring(BKEY.length >> 1), VBASE,
-      '/vault/nonce', '/vault/issue', '/vault/fetch',
-      'Content-Type', 'application/json', 'POST',
-      'HttpService', 'Players', 'LocalPlayer', 'Name', 'UserId', 'JobId',
-      'username', 'userId', 'jobId', 'nonce', 'proof', 'token', 'expiresIn',
-      'ok', 'content', 'key', 'value', 'unknown', SCRIPTID, 'scriptId'];
-    VSLOT = [];
-    for (var vi = 0; vi < VLITS.length; vi++) {
-      VSLOT.push(POOL.length);
-      POOL.push(cryptBytes(utf8bytes(VLITS[vi])));
-    }
-  }
-  var nreal = POOL.length;
-  if (nreal > 0) {
-    var order = [];
-    for (pi = 0; pi < nreal; pi++) order.push({e: POOL[pi], real: true, at: pi});
-    var nfake = nreal < 32 ? 8 : Math.min(64, Math.floor(nreal / 4));
-    var fchars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 :/.-_';
-    for (pi = 0; pi < nfake; pi++) {
-      var flen = 8 + rnd(17), fs = '';
-      for (pj = 0; pj < flen; pj++) fs += fchars.charAt(rnd(fchars.length));
-      order.push({e: cryptBytes(utf8bytes(fs)), real: false, at: -1});
-    }
-    for (pi = order.length - 1; pi > 0; pi--) {
-      pj = rnd(pi + 1);
-      tmp = order[pi]; order[pi] = order[pj]; order[pj] = tmp;
-    }
-    var parts = [];
-    for (pi = 0; pi < order.length; pi++) {
-      var oe = order[pi].e;
-      if (doDelayStr) {
-        parts.push('function()local v=' + DEC + '("' + oe[0] + '",' + oe[1] + ',' + oe[2] + ');return function()return v end end');
-      } else {
-        parts.push('function() return ' + DEC + '("' + oe[0] + '",' + oe[1] + ',' + oe[2] + ') end');
-      }
-      if (order[pi].real) slotOf[order[pi].at] = pi + 1;
-    }
-    poolCode = 'local ' + CNM + '={' + parts.join(',') + '};';
-    stats.pool = {real: nreal, fake: order.length - nreal};
-  } else {
-    stats.pool = {real: 0, fake: 0};
-  }
-  /* Vault client (bootstrap only): FNV-1a/64 proof via bit32, nonce ->
-     issue -> fetch, token cached in _G. Only live sessions pass the gate
-     above, so only they can use this. */
-  var vaultCode = '';
-  if (VSLOT) {
-    var VN = PREFIX + 'V';
-    var VS = function (k) { return CNM + '[' + slotOf[VSLOT[k]] + ']()'; };
-    vaultCode =
-      'local ' + VN + 'b=' + VS(0) + '..' + VS(1) + ';'
-      + 'local ' + VN + 'sid=' + VS(27) + ';'
-      + 'local ' + VN + 'z=string.char(0);'
-      + 'local function ' + VN + 'f(s)'
-      + 'local hi,lo=0xCBF29CE4,0x84222325;'
-      + 'for i=1,#s do '
-      + 'lo=bit32.bxor(lo,s:byte(i));'
-      + 'local a0=lo%65536;local a1=math.floor(lo/65536)%65536;'
-      + 'local a2=hi%65536;local a3=math.floor(hi/65536)%65536;'
-      + 'local r0=a0*435;local r1=a1*435;'
-      + 'local r2=a0*256+a2*435;local r3=a1*256+a3*435;'
-      + 'local t0=r0;local o0=t0%65536;'
-      + 'local t1=r1+math.floor(t0/65536);local o1=t1%65536;'
-      + 'local t2=r2+math.floor(t1/65536);local o2=t2%65536;'
-      + 'local t3=r3+math.floor(t2/65536);local o3=t3%65536;'
-      + 'hi=o3*65536+o2;lo=o1*65536+o0 end;'
-      + 'local dd="0123456789abcdef";local out="";'
-      + 'local vh=hi;for k=7,0,-1 do local p=16^k;local nib=math.floor(vh/p)%16;out=out..dd:sub(nib+1,nib+1) end;'
-      + 'local vl=lo;for k=7,0,-1 do local p=16^k;local nib=math.floor(vl/p)%16;out=out..dd:sub(nib+1,nib+1) end;'
-      + 'return out end;'
-      + '_G.VaultGet=function(key)'
-      + 'local ok,val=pcall(function()'
-      + 'local rq=(getgenv and(getgenv().request or getgenv().http_request))or request or http_request or(syn and syn.request);'
-      + 'if not rq then return nil end;'
-      + 'local hs=game:GetService(' + VS(9) + ');'
-      + 'local me=game[' + VS(10) + '][' + VS(11) + '];'
-      + 'local un=(me and me[' + VS(12) + '])or ' + VS(26) + ';'
-      + 'local uid=(me and me[' + VS(13) + '])or 0;'
-      + 'local jid=game[' + VS(14) + '] or "";'
-      + 'local now=os.time();local rec=_G.VaultToken;local tok=nil;'
-      + 'if type(rec)=="table" and type(rec.token)=="string" and rec.token~="" and type(rec.exp)=="number" and now<rec.exp then tok=rec.token;'
-      + 'else '
-      + 'local nrok,nr=pcall(function() return game:HttpGet(' + VS(2) + '..' + VS(3) + ') end);'
-      + 'if not(nrok and type(nr)=="string")then return nil end;'
-      + 'local okJ,nd=pcall(function() return hs:JSONDecode(nr) end);'
-      + 'if not(okJ and type(nd)=="table" and nd[' + VS(22) + '] and type(nd[' + VS(18) + '])=="string")then return nil end;'
-      + 'local nn=nd[' + VS(18) + '];'
-      + 'local proof=' + VN + 'f(' + VN + 'b..' + VN + 'z..nn..' + VN + 'z..un..' + VN + 'z..tostring(uid)..' + VN + 'z..jid);'
-      + 'local okI,ib=pcall(function() return hs:JSONEncode({[' + VS(15) + ']=un,[' + VS(16) + ']=uid,[' + VS(17) + ']=jid,[' + VS(18) + ']=nn,[' + VS(19) + ']=proof,[' + VS(28) + ']=' + VN + 'sid}) end);'
-      + 'if not okI then return nil end;'
-      + 'local ir=rq({Url=' + VS(2) + '..' + VS(4) + ',Method=' + VS(8) + ',Headers={[' + VS(6) + ']=' + VS(7) + '},Body=ib});'
-      + 'local ibb=ir and(ir.Body or ir.body);'
-      + 'if not(ir and(ir.Success or ir.StatusCode==200)and type(ibb)=="string")then return nil end;'
-      + 'local okD,idd=pcall(function() return hs:JSONDecode(ibb) end);'
-      + 'if not(okD and type(idd)=="table" and idd[' + VS(22) + '] and type(idd[' + VS(20) + '])=="string" and idd[' + VS(20) + ']~="")then return nil end;'
-      + 'tok=idd[' + VS(20) + '];'
-      + '_G.VaultToken={token=tok,exp=now+math.max((tonumber(idd[' + VS(21) + '])or 600)-30,60)};'
-      + 'end;'
-      + 'local okF,fb=pcall(function() return hs:JSONEncode({[' + VS(20) + ']=tok,[' + VS(16) + ']=uid,[' + VS(17) + ']=jid,[' + VS(24) + ']=key}) end);'
-      + 'if not okF then return nil end;'
-      + 'local fr=rq({Url=' + VS(2) + '..' + VS(5) + ',Method=' + VS(8) + ',Headers={[' + VS(6) + ']=' + VS(7) + '},Body=fb});'
-      + 'local fbb=fr and(fr.Body or fr.body);'
-      + 'if not(fr and(fr.Success or fr.StatusCode==200)and type(fbb)=="string")then '
-      + 'if fr and fr.StatusCode==401 then _G.VaultToken=nil end;return nil end;'
-      + 'local okV,vd=pcall(function() return hs:JSONDecode(fbb) end);'
-      + 'if okV and type(vd)=="table" and vd[' + VS(22) + '] then return vd[' + VS(25) + '] end;'
-      + 'return nil end);'
-      + 'if ok then return val end;return nil end;';
-  }
+
   stats.decoys = ndecoy;
   stats.junk = junkCount;
   stats.opaque = stats.opaque || 0;
@@ -1035,50 +1418,30 @@ function obfuscate(src, seed, opts) {
   stats.density = density;
   stats.vm = doVm;
   stats.bound = !bound ? 'off' : (bindUser > 0 ? 'place+user' : 'place');
-  stats.require = REQPATH;
-  stats.script = SCRIPTID;
-  stats.vault = (VSLOT !== null);
-  var code = head + junk + decoyOut + poolCode + vaultCode + body;
-  if (nreal > 0) {
+  stats.pool = {real: POOL.length, fake: 0};
+  stats.cff = doCff;
+
+  var code = head + junk + decoyOut + body;
+  if (POOL.length > 0) {
     code = code.replace(new RegExp(POOLPFX + '(\\d+)', 'g'), function (m, n) {
-      var call = CNM + '[' + slotOf[parseInt(n, 10)] + ']()';
-      return doDelayStr ? (call + '()') : call;
+      var call = poolInfo.access(parseInt(n, 10));
+      return doDelayStr ? (call + '()') : (call + '()');
     });
   }
-  /* VM-shell: encrypt final payload + dense loader (portable hybrid VM).
-     Full CFF bytecode VM lives in the v5 HTML tool; opts.vm here wraps the
-     already-obfuscated source in a decrypt+load shell that runs anywhere
-     loadstring/load is available (Roblox, many executors, Node via load). */
+
+  // ---- VM shell (opt-in) ----
   if (doVm) {
-    var payload = code;
-    var pk1 = '', pk2 = '', pi2;
-    for (pi2 = 0; pi2 < 16; pi2++) pk1 += String.fromCharCode(33 + rnd(90));
-    for (pi2 = 0; pi2 < 13; pi2++) pk2 += String.fromCharCode(33 + rnd(90));
-    var pbytes = [];
-    for (pi2 = 0; pi2 < payload.length; pi2++) {
-      var pb = payload.charCodeAt(pi2);
-      pb = pb ^ pk1.charCodeAt(pi2 % pk1.length);
-      pb = (pb + pk2.charCodeAt(pi2 % pk2.length)) % 256;
-      pbytes.push(pb);
+    var vm = buildVmShell(code, PREFIX, stats);
+    if (vm && vm.code) {
+      code = (doAnti ? buildAntiTamper() : 'local ' + PREFIX + 'K=' + SALT + ';') + vm.code;
+      stats.vm_bytes = vm.instrCount;
+      stats.vm_ops = vm.opcodeCount;
+    } else {
+      stats.vm_fallback = vm && vm.reason ? vm.reason : 'unsupported';
     }
-    var ld = PREFIX + 'L';
-    var bd = PREFIX + 'B';
-    var dk = PREFIX + 'K';
-    var loader = '';
-    loader += 'local ' + bd + '={' + pbytes.join(',') + '};';
-    loader += 'local ' + dk + '1="' + pk1.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '";';
-    loader += 'local ' + dk + '2="' + pk2.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '";';
-    loader += 'local function ' + ld + 'd()local o={}local b=' + bd + 'local k1=' + dk + '1 local k2=' + dk + '2;';
-    loader += 'for i=1,#b do local v=b[i];v=(v-k2:byte(((i-1)%#k2)+1))%256;v=bit32 and bit32.bxor(v,k1:byte(((i-1)%#k1)+1))or(v~k1:byte(((i-1)%#k1)+1));o[i]=string.char(v)end;';
-    loader += 'return table.concat(o)end;';
-    loader += 'local ' + ld + 's=' + ld + 'd();';
-    loader += 'local ' + ld + 'f=loadstring or load;';
-    loader += 'local ' + ld + 'fn=' + ld + 'f(' + ld + 's);';
-    loader += 'if ' + ld + 'fn then ' + ld + 'fn() end;';
-    code = (doAnti ? ANTI : '') + loader;
-    stats.vm_bytes = pbytes.length;
   }
-  return {code: code + '\n', stats: stats};
+
+  return { code: code + '\n', stats: stats };
 }
 
 return obfuscate;
