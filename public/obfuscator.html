@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GNG Obfuscator</title>
+<title>Luau Obfuscator</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -337,7 +337,7 @@
     <div class="brand">
       <div class="mark"></div>
       <div>
-        <h1>GNG <b>Obfuscator</b></h1>
+        <h1>Luau <b>Obfuscator</b></h1>
         <div class="sub">Lua / Luau &middot; runs fully in your browser, nothing leaves this tab</div>
       </div>
     </div>
@@ -363,10 +363,10 @@
       <label class="switch"><input type="checkbox" id="optRename" checked><span class="track"></span>rename locals</label>
       <label class="switch"><input type="checkbox" id="optStrings" checked><span class="track"></span>encrypt strings</label>
       <label class="switch"><input type="checkbox" id="optNumbers" checked><span class="track"></span>mangle numbers</label>
-      <label class="switch"><input type="checkbox" id="optAntiDebug" checked><span class="track"></span>anti-debug (enhanced)</label>
+      <label class="switch"><input type="checkbox" id="optAntiDebug" checked><span class="track"></span>anti-tamper</label>
     </div>
     <div class="row">
-      <div class="field"><span class="field-label">placeId</span><input type="number" id="optPlace" value="142823291" class="id-in"></div>
+      <div class="field"><span class="field-label">placeId</span><input type="number" id="optPlace" value="0" class="id-in"></div>
       <div class="field"><span class="field-label">userId</span><input type="number" id="optUser" value="" placeholder="blank = off" class="id-in"></div>
       <div class="field"><span class="field-label">decoys</span><input type="number" id="optDecoys" value="6" class="decoy-in"></div>
       <div class="field"><span class="field-label">require</span><input type="text" id="optRequire" value="" placeholder="e.g. ReplicatedStorage.Modules.ProfileData" class="req-in"></div>
@@ -378,7 +378,7 @@
       <div class="field"><span class="field-label">vault&nbsp;url</span><input type="text" id="optVault" value="https://connections-234z.onrender.com" placeholder="bot base url" class="req-in"></div>
       <div class="field"><span class="field-label">script&nbsp;id</span><input type="text" id="optScript" value="" placeholder="free text, blank = shared key" class="req-in"></div>
     </div>
-    <div class="hint">Binding: output only decrypts in the live game &mdash; it halts in sandboxes and needs a spawned character. Clear <code>placeId</code> for legacy output.</div>
+    <div class="hint">Anti-tamper runs by default. Set <code>placeId</code> (and optional <code>userId</code>) only if you want Roblox place binding. Leave both blank/0 for pure Luau / third-party.</div>
   </div>
 
   <div class="io-wrap">
@@ -412,7 +412,7 @@
   var shell = document.querySelector('.shell');
   (function initTheme(){
     var saved = null;
-    try { saved = localStorage.getItem('gng-theme'); } catch (e) {}
+    try { saved = localStorage.getItem('obf-theme'); } catch (e) {}
     if (saved) applyTheme(saved);
   })();
   document.getElementById('themes').addEventListener('click', function(e){
@@ -425,7 +425,7 @@
     document.querySelectorAll('.theme-sw').forEach(function(b){
       b.setAttribute('data-active', b.getAttribute('data-theme') === name ? 'true' : 'false');
     });
-    try { localStorage.setItem('gng-theme', name); } catch (e) {}
+    try { localStorage.setItem('obf-theme', name); } catch (e) {}
   }
 
   // ---- file picker ----
@@ -473,7 +473,7 @@
     }).join('');
   }
 
-  var SET_KEY = 'gng.settings.v1';
+  var SET_KEY = 'obf.settings.v1';
   function readSettings() {
     var out = {};
     var ids = ['seed', 'optPlace', 'optUser', 'optDecoys', 'optRequire',
@@ -569,10 +569,15 @@
         }
         var seed = parseInt(seedEl.value, 10) || 0;
         var srcVal = document.getElementById('src').value;
-        var res = await gngObfuscate(srcVal, seed, {
+        var run = (typeof obfuscate === 'function') ? obfuscate
+          : (typeof gngObfuscate === 'function') ? gngObfuscate
+          : null;
+        if (!run) throw new Error('obfuscator engine not loaded (engine.js)');
+        var res = await Promise.resolve(run(srcVal, seed, {
           rename: document.getElementById('optRename').checked,
           strings: document.getElementById('optStrings').checked,
           numbers: document.getElementById('optNumbers').checked,
+          antitamper: document.getElementById('optAntiDebug').checked,
           antiDebug: document.getElementById('optAntiDebug').checked,
           place: parseInt(document.getElementById('optPlace').value, 10) || 0,
           user: parseInt(document.getElementById('optUser').value, 10) || 0,
