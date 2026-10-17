@@ -468,7 +468,7 @@ function obfuscate(src, seed, opts) {
     if (nreal === 0) {
       return {
         code: '',
-        access: function () { return '(' + PREFIX + 'P0[0])'; },
+        access: function () { return '(' + PREFIX + 'P0[1])'; },
         slotCount: 0, poolCount: 0, decCount: 0
       };
     }
@@ -552,7 +552,7 @@ function obfuscate(src, seed, opts) {
         var didx = rnd(NDEC);
         var dn2 = PREFIX + 'D' + didx.toString(36);
         if (delayStr) {
-          entries.push('function()local v=' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K);return function()return v end end');
+          entries.push('(function()local c;return function()if c==nil then c=' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K)end;return c end end)()');
         } else {
           entries.push('function()return ' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K)end');
         }
@@ -564,8 +564,9 @@ function obfuscate(src, seed, opts) {
 
     function access(slotIdx) {
       var info = allSlotInfo[slotIdx];
-      if (!info) return PREFIX + 'P0[0]';
-      return PREFIX + 'P' + info.pool + '[' + info.shuffledIdx + ']';
+      /* Luau/Lua arrays are 1-indexed — shuffledIdx is 0-based from JS */
+      if (!info) return PREFIX + 'P0[1]';
+      return PREFIX + 'P' + info.pool + '[' + (info.shuffledIdx + 1) + ']';
     }
 
     return {
