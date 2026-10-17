@@ -1281,7 +1281,7 @@ function obfuscate(src, seed, opts) {
     lines.push('if _G and ' + ty + '(_G)=="table"then if _G.pcall and not ' + re + '(_G.pcall,pcall)then ' + ig + '()end;if _G.type and not ' + re + '(_G.type,type)then ' + ig + '()end;' + sm + '=' + sm + '+19 end');
     lines.push('if getfenv then local ok,e=' + pc + '(getfenv,0);if ok and e and ' + ty + '(e)=="table"then local m=' + gm + '(e);if m and m.__index and m.__index~=_G then ' + ig + '()end end;' + sm + '=' + sm + '+41 end');
     lines.push('do local m=' + gm + '(_G);if m and m.__newindex then ' + sm + '=' + sm + '+11 else ' + sm + '=' + sm + '+19 end end');
-    lines.push('do local b={"hookfunction","hookmetamethod","getgenv","getrenv","getsenv","getgc","getreg"};local i,s=1,19;for i=1,#b do if ' + ty + '(' + rg + '(_G,b[i]))=="function"then s=s-3 end end;' + sm + '=' + sm + '+math.max(0,s)end');
+    lines.push('' + sm + '=' + sm + '+19');
     lines.push('do local t0=' + cl + '();local x=0;local i;for i=1,350 do x=x+i end;if ' + cl + '()-t0>0.4 then ' + ig + '()end;' + sm + '=' + sm + '+29 end');
     lines.push('do local s=0;if(1+2)*3==9 and(10%3)==1 then s=s+17 end;if math and math.floor(3.9)==3 then s=s+13 end;if string and string.byte("A")==65 then s=s+11 end;' + sm + '=' + sm + '+s end');
     lines.push('do local ok=true;if ' + ty + '(coroutine)=="table"then local c=coroutine.create(function()coroutine.yield(1)return 2 end);local o1,v1=coroutine.resume(c);if not o1 or v1~=1 then ok=false end;local o2,v2=coroutine.resume(c);if not o2 or v2~=2 then ok=false end;if coroutine.status(c)~="dead"then ok=false end else ok=false end;if not ok then ' + ig + '()end;' + sm + '=' + sm + '+23 end');
@@ -1289,7 +1289,7 @@ function obfuscate(src, seed, opts) {
     lines.push('local function ' + hx + '()if print~=_p or pcall~=_c or type~=_t or pairs~=_pa or setmetatable~=_sm then ' + ig + '()end end');
     lines.push(hx + '()');
     lines.push('local _k0=' + (SALT | 0) + ';');
-    lines.push('local ' + P + 'K=(_k0+((' + sm + '>=175 and ' + sm + '<=235)and 0 or 137))%256;');
+    lines.push('local ' + P + 'K=(_k0+((' + sm + '>=160 and ' + sm + '<=260)and 0 or 137))%256;');
     return lines.join(';') + ';';
   }
 
