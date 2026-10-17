@@ -8,7 +8,7 @@ const app = express();
 app.use(express.json()); // Parse JSON request bodies
 app.get('/', (req, res) => res.send('Discord Bot Running'));
 
-// GNG obfuscator page (static UI + shared engine, same deploy)
+// Luau obfuscator page (static UI + shared engine, same deploy)
 // NOTE: /modules/*.js must be served as application/javascript or the
 // browser refuses the dynamic import() with
 // "Failed to fetch dynamically imported module".
@@ -167,7 +167,7 @@ app.post('/state/:username', (req, res) => {
     res.json({ success: true });
 });
 
-// ---- GNG vault (additive; no route above is modified) ----
+// ---- Vault (additive; no route above is modified) ----
 // Short-lived session secrets for obfuscated scripts. Nothing here changes
 // bot behavior: existing endpoints, Discord flow, and states are untouched.
 // Secrets live in Render env vars; Pastefy (optional) holds only an audit
@@ -228,7 +228,7 @@ function vaudit(ev) {
             const line = JSON.stringify(Object.assign({ t: Date.now() }, ev)) + '\n';
             if (!auditPasteId) {
                 const created = await pastefyReq('POST', '/paste', {
-                    title: 'GNG-VAULT-AUDIT (do not touch)',
+                    title: 'VAULT-AUDIT (do not touch)',
                     content: line,
                     visibility: 'PRIVATE',
                     type: 'PASTE'
