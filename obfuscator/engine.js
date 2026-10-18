@@ -314,17 +314,22 @@ function obfuscate(src, seed, opts) {
     var k = (KCHAIN[slotChain] + q) % 256;
     if (k === 0) k = 1;
     var hx = '';
-    var i, b, roll, roll2, k2;
+    var i, b, roll, roll2, k2, ok;
     STRIDX++;
     k2 = ((k * 37 + q * 91 + SALT * 13) & 255) || 1;
     roll = (k * 131 + SALT * 17 + q * 29) & 255;
     roll2 = (k2 * 53 + q * 17) & 255;
     for (i = 0; i < data.length; i++) {
+      // --- layer 1: chained stream (inner) ---
       roll = (roll * 73 + i * 11 + k) & 255;
       roll2 = (roll2 * 47 + i * 19 + k2) & 255;
       b = (data[i] + k + SALT + (q * 7) + (i * 3)) & 255;
       b = b ^ roll;
       b = (b + roll2) & 255;
+      // --- layer 2: outer XOR + nibble-swap (keyed by slot+index) ---
+      ok = ((q * 31 + 17 + i * 13) & 255) || 1;
+      b = b ^ ok;
+      b = ((b & 15) << 4) | (b >> 4);
       hx += (b < 16 ? '0' : '') + b.toString(16);
     }
     // record the ciphertext + slot index; the runtime reconstructs k/q
@@ -536,8 +541,10 @@ function obfuscate(src, seed, opts) {
       var dn = PREFIX + rloc() + i.toString(36);
       decNames.push(dn);
       var lk = rloc(), lq = rloc(), lk2 = rloc(), lr = rloc(), lr2 = rloc(), lrs = rloc(), lb = rloc(), lp = rloc();
+      // lok = outer-layer key local name
+      var lok = rloc();
       if (i % 2 === 0) {
-        // forward scan
+        // forward scan — reverse layer2 then layer1
         decCode += 'local function ' + dn + '(h,s,K)\n'
           + 'local ' + lk + '=' + kyN + '(s,K)\n'
           + 'local ' + lq + '=s\n'
@@ -551,6 +558,12 @@ function obfuscate(src, seed, opts) {
           + lr + '=(' + lr + '*73+(' + lp + '-1)*11+' + lk + ')%256\n'
           + lr2 + '=(' + lr2 + '*47+(' + lp + '-1)*19+' + lk2 + ')%256\n'
           + 'local ' + lb + '=tonumber(h:sub(i,i+1),16)\n'
+          // layer 2 reverse: nibble-swap (self-inverse) then XOR outer key
+          + 'local ' + lok + '=((' + lq + '*31+17+(' + lp + '-1)*13)%256)\n'
+          + 'if ' + lok + '==0 then ' + lok + '=1 end\n'
+          + lb + '=(((' + lb + '%16)*16)+math.floor(' + lb + '/16))%256\n'
+          + lb + '=' + bxN + '(' + lb + ',' + lok + ')\n'
+          // layer 1 reverse
           + lb + '=((' + lb + '-' + lr2 + ')%256+256)%256\n'
           + lb + '=' + bxN + '(' + lb + ',' + lr + ')\n'
           + lb + '=((' + lb + '-' + lk + '-K-(' + lq + '*7)-((' + lp + '-1)*3))%256+256)%256\n'
@@ -559,9 +572,7 @@ function obfuscate(src, seed, opts) {
           + 'return table.concat(' + lrs + ')\n'
           + 'end\n';
       } else {
-        // reverse scan (same math, reverse emit order — matches cryptBytes forward)
-        // Must still decrypt forward because cryptBytes is forward; reverse only
-        // changes local structure. Use forward body with different local names.
+        // alternate local structure, same two-layer reverse
         decCode += 'local function ' + dn + '(h,s,K)\n'
           + 'local ' + lk + '=' + kyN + '(s,K)\n'
           + 'local ' + lq + '=s\n'
@@ -576,6 +587,10 @@ function obfuscate(src, seed, opts) {
           + lr + '=(' + lr + '*73+(' + lp + '-1)*11+' + lk + ')%256\n'
           + lr2 + '=(' + lr2 + '*47+(' + lp + '-1)*19+' + lk2 + ')%256\n'
           + 'local ' + lb + '=tonumber(h:sub(i,i+1),16)\n'
+          + 'local ' + lok + '=((' + lq + '*31+17+(' + lp + '-1)*13)%256)\n'
+          + 'if ' + lok + '==0 then ' + lok + '=1 end\n'
+          + lb + '=(((' + lb + '%16)*16)+math.floor(' + lb + '/16))%256\n'
+          + lb + '=' + bxN + '(' + lb + ',' + lok + ')\n'
           + lb + '=((' + lb + '-' + lr2 + ')%256+256)%256\n'
           + lb + '=' + bxN + '(' + lb + ',' + lr + ')\n'
           + lb + '=((' + lb + '-' + lk + '-K-(' + lq + '*7)-((' + lp + '-1)*3))%256+256)%256\n'
