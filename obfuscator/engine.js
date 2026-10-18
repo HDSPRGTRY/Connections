@@ -449,12 +449,12 @@ function obfuscate(src, seed, opts) {
           var ck = cryptBytes(data);
           POOL.push(ck);
           var ph = POOLPFX + (POOL.length - 1);
-          // Delta rejects f()(args) consecutive calls. Emit a single-call
-          // wrapper with newlines so the following (args) is one normal call.
+          // Delta rejects f()(args). Single-call IIFE with randomized locals.
           if (la[1] === '(') {
-            emit('(function(...)\nlocal _f=_E(' + ph + ')\nreturn _f(...)\nend)');
+            var t1 = _rsym(2 + rnd(2)), t2 = _rsym(2 + rnd(2));
+            emit('(function(...)\nlocal ' + t1 + '=' + ENVFN + '(' + ph + ')\nreturn ' + t1 + '(...)\nend)');
           } else {
-            emit('_E(' + ph + ')');
+            emit(ENVFN + '(' + ph + ')');
           }
           stats.env_enc = (stats.env_enc || 0) + 1;
           return;
@@ -504,72 +504,134 @@ function obfuscate(src, seed, opts) {
     for (i = 0; i < KCHAIN.length; i++) {
       chainPacked += (KCHAIN[i] < 10 ? '00' : (KCHAIN[i] < 100 ? '0' : '')) + KCHAIN[i];
     }
-    // pack 64*3 = 192 chars → single literal
-    // Pure arithmetic XOR (works on Lua 5.1 and Luau; no bit32 / ~ required)
+    // Random internal names (bound from outer scope when available)
+    var chN = (typeof CHVAR !== 'undefined' && CHVAR) ? CHVAR : (PREFIX + 'c');
+    var bxN = (typeof BXFN !== 'undefined' && BXFN) ? BXFN : (PREFIX + 'x');
+    var kyN = (typeof KEYFN !== 'undefined' && KEYFN) ? KEYFN : (PREFIX + 'y');
+    // Per-decryptor random local names to break template matching
+    function rloc() {
+      var s = '', k;
+      for (k = 0; k < 2 + rnd(2); k++) s += _alpha.charAt(rnd(26));
+      return s;
+    }
+
     var decCode = '';
-    decCode += 'local _ch="' + chainPacked + '"\n'
-      + 'local function ' + PREFIX + 'bx(a,b)\n'
+    decCode += 'local ' + chN + '="' + chainPacked + '"\n'
+      + 'local function ' + bxN + '(a,b)\n'
       + 'a=a%256\nb=b%256\nlocal r=0\n'
       + 'for i=0,7 do\n'
       + 'local x=a%2\nlocal y=b%2\n'
       + 'if x~=y then r=r+2^i end\n'
       + 'a=math.floor(a/2)\nb=math.floor(b/2)\n'
       + 'end\nreturn r\nend\n'
-      + 'local function ' + PREFIX + 'key(s,kk)\n'
+      + 'local function ' + kyN + '(s,kk)\n'
       + 'local p=((s*17+kk*5+131)%' + KCHAIN.length + ')*3+1\n'
-      + 'local v=tonumber(_ch:sub(p,p+2))\n'
+      + 'local v=tonumber(' + chN + ':sub(p,p+2))\n'
       + 'local k=(v+s)%256\nif k==0 then k=1 end\nreturn k\nend\n';
 
-    // Single proven decryptor style (forward scan) — works reliably on Delta
+    // Dual decryptor styles (forward + reverse) — both multi-line for Delta
+    NDEC = Math.min(6, Math.max(2, NDEC));
+    var decNames = [];
     for (i = 0; i < NDEC; i++) {
-      var dn = PREFIX + 'D' + i.toString(36);
-      decCode += 'local function ' + dn + '(h,s,K)\n'
-        + 'local k=' + PREFIX + 'key(s,K)\n'
-        + 'local q=s\n'
-        + 'local k2=((k*37+q*91+K*13)%256)\nif k2==0 then k2=1 end\n'
-        + 'local roll=(k*131+K*17+q*29)%256\n'
-        + 'local roll2=(k2*53+q*17)%256\n'
-        + 'local r={}\n'
-        + 'for i=1,#h,2 do\n'
-        + 'local p=(i+1)/2\n'
-        + 'roll=(roll*73+(p-1)*11+k)%256\n'
-        + 'roll2=(roll2*47+(p-1)*19+k2)%256\n'
-        + 'local b=tonumber(h:sub(i,i+1),16)\n'
-        + 'b=((b-roll2)%256+256)%256\n'
-        + 'b=' + PREFIX + 'bx(b,roll)\n'
-        + 'b=((b-k-K-(q*7)-((p-1)*3))%256+256)%256\n'
-        + 'r[#r+1]=string.char(b)\n'
-        + 'end\n'
-        + 'return table.concat(r)\n'
-        + 'end\n';
+      var dn = PREFIX + rloc() + i.toString(36);
+      decNames.push(dn);
+      var lk = rloc(), lq = rloc(), lk2 = rloc(), lr = rloc(), lr2 = rloc(), lrs = rloc(), lb = rloc(), lp = rloc();
+      if (i % 2 === 0) {
+        // forward scan
+        decCode += 'local function ' + dn + '(h,s,K)\n'
+          + 'local ' + lk + '=' + kyN + '(s,K)\n'
+          + 'local ' + lq + '=s\n'
+          + 'local ' + lk2 + '=((' + lk + '*37+' + lq + '*91+K*13)%256)\n'
+          + 'if ' + lk2 + '==0 then ' + lk2 + '=1 end\n'
+          + 'local ' + lr + '=(' + lk + '*131+K*17+' + lq + '*29)%256\n'
+          + 'local ' + lr2 + '=(' + lk2 + '*53+' + lq + '*17)%256\n'
+          + 'local ' + lrs + '={}\n'
+          + 'for i=1,#h,2 do\n'
+          + 'local ' + lp + '=(i+1)/2\n'
+          + lr + '=(' + lr + '*73+(' + lp + '-1)*11+' + lk + ')%256\n'
+          + lr2 + '=(' + lr2 + '*47+(' + lp + '-1)*19+' + lk2 + ')%256\n'
+          + 'local ' + lb + '=tonumber(h:sub(i,i+1),16)\n'
+          + lb + '=((' + lb + '-' + lr2 + ')%256+256)%256\n'
+          + lb + '=' + bxN + '(' + lb + ',' + lr + ')\n'
+          + lb + '=((' + lb + '-' + lk + '-K-(' + lq + '*7)-((' + lp + '-1)*3))%256+256)%256\n'
+          + lrs + '[#' + lrs + '+1]=string.char(' + lb + ')\n'
+          + 'end\n'
+          + 'return table.concat(' + lrs + ')\n'
+          + 'end\n';
+      } else {
+        // reverse scan (same math, reverse emit order — matches cryptBytes forward)
+        // Must still decrypt forward because cryptBytes is forward; reverse only
+        // changes local structure. Use forward body with different local names.
+        decCode += 'local function ' + dn + '(h,s,K)\n'
+          + 'local ' + lk + '=' + kyN + '(s,K)\n'
+          + 'local ' + lq + '=s\n'
+          + 'local ' + lk2 + '=((' + lk + '*37+' + lq + '*91+K*13)%256)\n'
+          + 'if ' + lk2 + '==0 then ' + lk2 + '=1 end\n'
+          + 'local ' + lr + '=(' + lk + '*131+K*17+' + lq + '*29)%256\n'
+          + 'local ' + lr2 + '=(' + lk2 + '*53+' + lq + '*17)%256\n'
+          + 'local ' + lrs + '={}\n'
+          + 'local ' + lp + '=0\n'
+          + 'for i=1,#h,2 do\n'
+          + lp + '=' + lp + '+1\n'
+          + lr + '=(' + lr + '*73+(' + lp + '-1)*11+' + lk + ')%256\n'
+          + lr2 + '=(' + lr2 + '*47+(' + lp + '-1)*19+' + lk2 + ')%256\n'
+          + 'local ' + lb + '=tonumber(h:sub(i,i+1),16)\n'
+          + lb + '=((' + lb + '-' + lr2 + ')%256+256)%256\n'
+          + lb + '=' + bxN + '(' + lb + ',' + lr + ')\n'
+          + lb + '=((' + lb + '-' + lk + '-K-(' + lq + '*7)-((' + lp + '-1)*3))%256+256)%256\n'
+          + lrs + '[' + lp + ']=string.char(' + lb + ')\n'
+          + 'end\n'
+          + 'return table.concat(' + lrs + ')\n'
+          + 'end\n';
+      }
     }
 
+    // Index-base offsets for computed pool access (hides P[1], P[2] literals)
     var poolCode = '';
     var allSlotInfo = {};
+    var poolNames = [];
+    var indexBases = [];
+    for (i = 0; i < NP; i++) {
+      poolNames.push(PREFIX + rloc() + 't' + i.toString(36));
+      indexBases.push(1 + rnd(17)); // access as P[base + delta]
+    }
     for (i = 0; i < NP; i++) {
       var entries = [];
+      // Pad front with decoy nils so real entries sit at base+delta
+      var base = indexBases[i];
+      var pad = [];
+      for (j = 1; j < base; j++) pad.push('0');
       for (j = 0; j < seeds[i].length; j++) {
         var e = subPools[i][seeds[i][j]];
         var didx = rnd(NDEC);
-        var dn2 = PREFIX + 'D' + didx.toString(36);
+        var dn2 = decNames[didx];
         if (delayStr) {
           entries.push('function() local v=' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K) return function() return v end end');
         } else {
           entries.push('function() return ' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K) end');
         }
-        // Lua tables are 1-based; emit 1-based indices
-        allSlotInfo[e.idx] = {pool: i, shuffledIdx: j + 1};
+        allSlotInfo[e.idx] = { pool: i, shuffledIdx: base + j, base: base, delta: j };
       }
       if (entries.length > 0) {
-        poolCode += 'local ' + PREFIX + 'P' + i + '={' + entries.join(',') + '};\n';
+        poolCode += 'local ' + poolNames[i] + '={' + pad.concat(entries).join(',') + '}\n';
       }
     }
     decCode += poolCode;
 
     function access(slotIdx) {
       var info = allSlotInfo[slotIdx];
-      if (!info) return PREFIX + 'P0[1]';
-      return PREFIX + 'P' + info.pool + '[' + info.shuffledIdx + ']';
+      if (!info) return poolNames[0] + '[1]';
+      // Computed index: P[(base)+(delta)] or P[base+delta] with opaque form
+      var form = rnd(3);
+      if (form === 0) {
+        return poolNames[info.pool] + '[' + info.base + '+' + info.delta + ']';
+      } else if (form === 1) {
+        return poolNames[info.pool] + '[' + (info.base + info.delta) + ']';
+      } else {
+        var a = info.base + rnd(3);
+        var b = a - info.base;
+        return poolNames[info.pool] + '[' + a + '-' + b + '+' + info.delta + ']';
+      }
     }
 
     return {
@@ -1302,6 +1364,17 @@ function obfuscate(src, seed, opts) {
   var di = 0;
   while (Object.prototype.hasOwnProperty.call(idents, DEC)) { di++; DEC = PREFIX + 'd' + di; }
   POOLPFX = PREFIX + 'p';
+  // Randomized internal symbol names (no stable _E / _ch / D0 breadcrumbs)
+  function _rsym(n) {
+    var s = '_', i;
+    for (i = 0; i < n; i++) s += _alpha.charAt(rnd(26));
+    return s;
+  }
+  var ENVFN = _rsym(4 + rnd(3));   // was _E
+  var CHVAR = _rsym(3 + rnd(2));   // was _ch
+  var BXFN  = _rsym(3 + rnd(2));   // was PREFIXbx
+  var KEYFN = _rsym(3 + rnd(2));   // was PREFIXkey
+  var GREF  = _rsym(3 + rnd(2));   // cached getgenv table
   STRIDX = 0; POOL = [];
   POS = 0;
   parseBlock([]);
@@ -1323,8 +1396,8 @@ function obfuscate(src, seed, opts) {
     head += 'local ' + PREFIX + 'K=' + SALT + ';';
   }
   if (doHideEnv) {
-    // getgenv holds hooked print on Delta/Synapse-class executors
-    head += 'local function _E(n)\n'
+    // Randomized resolver name; getgenv first (Delta hooks live there)
+    head += 'local function ' + ENVFN + '(n)\n'
       + 'local g=getgenv and getgenv()\n'
       + 'if type(g)=="table" and type(g[n])=="function" then return g[n] end\n'
       + 'g=getrenv and getrenv()\n'
@@ -1356,25 +1429,36 @@ function obfuscate(src, seed, opts) {
       + 'if ' + PREFIX + 'S==nil then return end;';
   }
 
-  // ---- junk (mutates real scope) ----
+  // ---- junk (looks like real logic; never feeds live path) ----
   var junk = '';
-  var junkCount = doJunk ? Math.floor((6 + rnd(6)) * (0.5 + density)) : 0;
-  for (var jnI = 0; jnI < junkCount; jnI++) {
-    var kind = rnd(3);
-    if (kind === 0) junk += "do local _t=(function(a)return a end)(1);_t=_t+(('\\x01\\x02'):len()-('\\x01\\x02'):len())end;";
-    else if (kind === 1) junk += "do local _u=(1==1)and 0 or 1;_u=_u+0 end;";
-    else junk += "do local _v=(nil==false)and 1 or 0;_v=_v+0 end;";
+  var junkCount = doJunk ? Math.floor((6 + rnd(8)) * (0.5 + density)) : 0;
+  function jsym() {
+    var s = '_', ji;
+    for (ji = 0; ji < 3 + rnd(2); ji++) s += _alpha.charAt(rnd(26));
+    return s;
   }
-  // note: :len() is Luau; on plain Lua it's #. Use # to be safe.
-  junk = junk.replace(/:len\(\)/g, '');
-  junk = junk.replace(/'\\x01\\x02'\)\)/g, "'\\x01\\x02'))");
-  // Simpler robust junk:
-  junk = '';
-  for (var jnI2 = 0; jnI2 < junkCount; jnI2++) {
-    var kind2 = rnd(3);
-    if (kind2 === 0) junk += "do local _t=(function(a)return a end)(1);_t=_t+(('\\x01\\x02') and 0 or 1)end;";
-    else if (kind2 === 1) junk += "do local _u=(1==1)and 0 or 1;_u=_u+0 end;";
-    else junk += "do local _v=(nil==false)and 1 or 0;_v=_v+0 end;";
+  for (var jnI = 0; jnI < junkCount; jnI++) {
+    var kind = rnd(6);
+    var a = jsym(), b = jsym(), c = jsym();
+    if (kind === 0) {
+      junk += 'do\nlocal ' + a + '={}\nlocal ' + b + '=0\nfor ' + c + '=1,' + (3 + rnd(5)) + ' do\n'
+        + a + '[' + c + ']=' + c + '*' + (1 + rnd(7)) + '\n' + b + '=' + b + '+' + a + '[' + c + ']\nend\nend\n';
+    } else if (kind === 1) {
+      junk += 'do\nlocal ' + a + '=0\nlocal ' + b + '="' + _alpha.charAt(rnd(26)) + _alpha.charAt(rnd(26)) + '"\n'
+        + 'if #' + b + '>0 then ' + a + '=#' + b + ' end\n' + a + '=' + a + '-#' + b + '\nend\n';
+    } else if (kind === 2) {
+      junk += 'do\nlocal ' + a + '=(function(' + b + ') return ' + b + ' end)(' + (1 + rnd(9)) + ')\n'
+        + 'local ' + c + '=' + a + '+' + (rnd(4)) + '-' + a + '\nend\n';
+    } else if (kind === 3) {
+      junk += 'do\nlocal ' + a + '={n=' + (10 + rnd(40)) + '}\n'
+        + 'if ' + a + '.n>0 and ' + a + '.n<' + (100 + rnd(50)) + ' then\n'
+        + 'local ' + b + '=' + a + '.n*0\nend\nend\n';
+    } else if (kind === 4) {
+      junk += 'do\nlocal ' + a + '=1\nwhile ' + a + '<1 do ' + a + '=' + a + '+1 end\nend\n';
+    } else {
+      junk += 'do\nlocal ' + a + '=select(1,' + (rnd(5)) + ')\n'
+        + 'local ' + b + '=type(' + a + ')=="number" and 0 or 0\nend\n';
+    }
   }
 
   // ---- decoys ----
@@ -1394,7 +1478,7 @@ function obfuscate(src, seed, opts) {
     poolInfo = buildPoolCode(POOL, doDelayStr);
     head = '';
     if (doAnti) head += buildAntiTamper(); else head += 'local ' + PREFIX + 'K=' + SALT + ';';
-    if (doHideEnv) head += 'local function _E(n)\n'
+    if (doHideEnv) head += 'local function ' + ENVFN + '(n)\n'
       + 'local g=getgenv and getgenv()\n'
       + 'if type(g)=="table" and type(g[n])=="function" then return g[n] end\n'
       + 'g=getrenv and getrenv()\n'
