@@ -335,6 +335,212 @@ app.post('/vault/fetch', (req, res) => {
     res.json({ ok: true, value: VAULT_SECRETS[key] });
 });
 
+// ---- Admin (ADMIN_KEY-gated). Fetch list lives in a private Pastefy paste. ----
+// Fetching any public raw link is allowed. Private, loopback and link-local
+// addresses are refused on every redirect hop, so the server cannot be pointed
+// at Render's internal network.
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+const dnsP = require('dns').promises;
+const netMod = require('net');
+let adminPasteId = process.env.ADMIN_LIST_PASTE || '';
+let adminEntries = [];
+let adminLoaded = false;
+const ADMIN_MAX_ENTRIES = 50;
+const ADMIN_FETCH_MAX = 1024 * 1024;
+const ADMIN_FETCH_MS = 10000;
+const adminFails = new Map(); // ip -> {n, t}
+
+function adminKeyOk(given) {
+    if (!ADMIN_KEY || typeof given !== 'string' || !given) return false;
+    const a = Buffer.from(given, 'utf8'), b = Buffer.from(ADMIN_KEY, 'utf8');
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function requireAdmin(req, res, next) {
+    if (!ADMIN_KEY) return res.status(503).json({ error: 'admin disabled (ADMIN_KEY not set)' });
+    const ip = String(req.ip || '');
+    const rec = adminFails.get(ip);
+    if (rec && rec.n >= 20 && Date.now() - rec.t < 10 * 60 * 1000) {
+        return res.status(429).json({ error: 'too many attempts, try later' });
+    }
+    if (!adminKeyOk(req.get('x-admin-key') || '')) {
+        const r = rec && Date.now() - rec.t < 10 * 60 * 1000 ? rec : { n: 0, t: Date.now() };
+        r.n += 1;
+        adminFails.set(ip, r);
+        return res.status(401).json({ error: 'unauthorized' });
+    }
+    adminFails.delete(ip);
+    next();
+}
+
+function isPrivateAddress(ip) {
+    const v = netMod.isIP(ip);
+    if (v === 4) {
+        const p = ip.split('.').map(Number);
+        if (p[0] === 0 || p[0] === 10 || p[0] === 127) return true;
+        if (p[0] === 169 && p[1] === 254) return true;
+        if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+        if (p[0] === 192 && p[1] === 168) return true;
+        if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // carrier-grade NAT
+        if (p[0] >= 224) return true; // multicast and reserved
+        return false;
+    }
+    if (v === 6) {
+        const l = ip.toLowerCase();
+        if (l === '::' || l === '::1') return true;
+        if (/^f[cd]/.test(l)) return true;          // fc00::/7
+        if (/^fe[89ab]/.test(l)) return true;       // fe80::/10
+        if (l.startsWith('::ffff:')) {              // IPv4-mapped: judge the embedded IPv4
+            const m = l.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+            return m ? isPrivateAddress(m[1]) : true;
+        }
+        return false;
+    }
+    return true; // not an address: refuse
+}
+
+async function checkPublicUrl(raw) {
+    let u;
+    try { u = new URL(String(raw || '')); } catch (e) { throw new Error('invalid url'); }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('only http and https links');
+    if (u.username || u.password) throw new Error('credentials in url not allowed');
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    const addrs = netMod.isIP(host) ? [{ address: host }] : await dnsP.lookup(host, { all: true });
+    if (!addrs || !addrs.length) throw new Error('host did not resolve');
+    for (const a of addrs) if (isPrivateAddress(a.address)) throw new Error('address not allowed');
+    return u;
+}
+
+async function adminFetchText(rawUrl) {
+    if (typeof fetch === 'undefined') throw new Error('fetch unavailable on this Node version');
+    let u = await checkPublicUrl(rawUrl);
+    for (let hop = 0; hop < 4; hop++) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), ADMIN_FETCH_MS);
+        try {
+            const r = await fetch(u.toString(), {
+                redirect: 'manual',
+                signal: ctrl.signal,
+                headers: { 'User-Agent': 'obfuscator-admin-fetch/1.0', 'Accept': 'text/plain, */*' }
+            });
+            const loc = r.headers.get('location');
+            if (r.status >= 300 && r.status < 400 && loc) {
+                u = await checkPublicUrl(new URL(loc, u).toString());
+                continue;
+            }
+            if (!r.ok) throw new Error('upstream HTTP ' + r.status);
+            const declared = Number(r.headers.get('content-length') || 0);
+            if (declared > ADMIN_FETCH_MAX) throw new Error('response too large');
+            if (!r.body) return { status: r.status, text: '' };
+            const reader = r.body.getReader();
+            const chunks = [];
+            let total = 0;
+            for (;;) {
+                const step = await reader.read();
+                if (step.done) break;
+                total += step.value.length;
+                if (total > ADMIN_FETCH_MAX) { ctrl.abort(); throw new Error('response too large'); }
+                chunks.push(Buffer.from(step.value));
+            }
+            return { status: r.status, text: Buffer.concat(chunks).toString('utf8') };
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+    throw new Error('too many redirects');
+}
+
+// Loads the list once. adminLoaded stays false when Pastefy is unset or unreachable,
+// and saves are refused in that state so an outage can never overwrite the list.
+async function adminLoad() {
+    if (adminLoaded) return true;
+    if (!PASTEFY_API_KEY) return false;
+    if (!adminPasteId) {
+        const created = await pastefyReq('POST', '/paste', {
+            title: 'ADMIN-FETCH-LIST (do not touch)',
+            content: '[]',
+            visibility: 'PRIVATE',
+            type: 'PASTE'
+        });
+        const nid = created && created.paste && created.paste.id;
+        if (!nid) return false;
+        adminPasteId = nid;
+        adminEntries = [];
+        adminLoaded = true;
+        console.log('[admin] list paste created: ' + nid + ' (set ADMIN_LIST_PASTE to this id on Render)');
+        return true;
+    }
+    const cur = await pastefyReq('GET', '/paste/' + encodeURIComponent(adminPasteId));
+    if (!cur || typeof cur.content !== 'string') return false;
+    try {
+        const parsed = JSON.parse(cur.content || '[]');
+        if (!Array.isArray(parsed)) return false;
+        adminEntries = parsed;
+        adminLoaded = true;
+        return true;
+    } catch (e) { return false; }
+}
+
+async function adminSave(previous) {
+    const ok = !!(await pastefyReq('PUT', '/paste/' + encodeURIComponent(adminPasteId), {
+        content: JSON.stringify(adminEntries)
+    }));
+    if (!ok) adminEntries = previous; // roll back so memory matches storage
+    return ok;
+}
+
+async function adminReady(req, res, next) {
+    let ok = false;
+    try { ok = await adminLoad(); } catch (e) { ok = false; }
+    if (!ok) return res.status(503).json({ error: 'list storage not configured or unreachable' });
+    next();
+}
+
+app.get('/admin/api/entries', requireAdmin, adminReady, (req, res) => {
+    res.json({ ok: true, entries: adminEntries.map(e => ({ id: e.id, label: e.label, url: e.url })) });
+});
+
+app.post('/admin/api/entries', requireAdmin, adminReady, async (req, res) => {
+    const label = String((req.body || {}).label || '').trim().slice(0, 60) || 'untitled';
+    const url = String((req.body || {}).url || '').trim();
+    if (adminEntries.length >= ADMIN_MAX_ENTRIES) return res.status(400).json({ error: 'list is full' });
+    try { await checkPublicUrl(url); } catch (e) { return res.status(400).json({ error: e.message }); }
+    const previous = adminEntries.slice();
+    adminEntries = adminEntries.concat([{ id: crypto.randomBytes(6).toString('hex'), label: label, url: url, added: Date.now() }]);
+    if (!(await adminSave(previous))) return res.status(502).json({ error: 'could not save the list' });
+    res.json({ ok: true, entries: adminEntries.map(e => ({ id: e.id, label: e.label, url: e.url })) });
+});
+
+app.delete('/admin/api/entries/:id', requireAdmin, adminReady, async (req, res) => {
+    const previous = adminEntries.slice();
+    adminEntries = adminEntries.filter(e => e.id !== req.params.id);
+    if (adminEntries.length === previous.length) return res.status(404).json({ error: 'no such entry' });
+    if (!(await adminSave(previous))) return res.status(502).json({ error: 'could not save the list' });
+    res.json({ ok: true, entries: adminEntries.map(e => ({ id: e.id, label: e.label, url: e.url })) });
+});
+
+app.post('/admin/api/fetch', requireAdmin, async (req, res) => {
+    const url = String((req.body || {}).url || '').trim();
+    try {
+        const r = await adminFetchText(url);
+        console.log('[admin] fetch ' + new URL(url).hostname + ' -> ' + r.status);
+        res.json({ ok: true, status: r.status, text: r.text });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
+
+app.post('/admin/api/entries/:id/fetch', requireAdmin, adminReady, async (req, res) => {
+    const entry = adminEntries.find(e => e.id === req.params.id);
+    if (!entry) return res.status(404).json({ error: 'no such entry' });
+    try {
+        const r = await adminFetchText(entry.url);
+        res.json({ ok: true, status: r.status, text: r.text });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
+
 if (!BOT_TOKEN) {
     console.warn('[discord] BOT_TOKEN missing — bot login skipped, web endpoints still live');
 } else {
