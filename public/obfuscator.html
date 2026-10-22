@@ -515,6 +515,20 @@
   }
   footer.page-foot a { color: var(--dim); text-decoration: none; }
   footer.page-foot a:hover { color: var(--accent-ir); }
+
+  /* admin panel (hidden until the server accepts ADMIN_KEY) */
+  .admin { margin: 0 0 18px; padding: 16px; border: 1px solid var(--border-lit); border-radius: var(--r-sm); background: var(--well); }
+  .admin[hidden], .admin-body[hidden], .admin-lock[hidden] { display: none !important; }
+  .admin-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-family: var(--font-mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim-2); }
+  .admin-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .admin-row input { flex: 1; min-width: 0; }
+  .admin-block { margin-top: 12px; }
+  .admin-title { font-family: var(--font-mono); font-size: 11px; color: var(--dim-2); margin-bottom: 6px; }
+  .admin-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .admin-item { display: flex; gap: 8px; align-items: center; font-family: var(--font-mono); font-size: 11.5px; }
+  .admin-item .lbl { color: var(--text); min-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .admin-item .url { flex: 1; color: var(--dim-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #adminOut { width: 100%; min-height: 140px; margin-top: 10px; background: var(--surface-2, var(--well)); color: var(--text); border: 1px solid var(--border-lit); border-radius: var(--r-sm); padding: 10px; font-family: var(--font-mono); font-size: 11.5px; resize: vertical; box-sizing: border-box; }
 </style>
 </head>
 <body>
@@ -548,6 +562,36 @@
       <div class="chip">last run <b id="chipLastRun">&mdash;</b></div>
     </div>
   </div>
+
+  <section class="admin" id="admin" hidden>
+    <div class="admin-head"><span>Admin</span><span id="adminState">locked</span></div>
+    <div class="admin-lock" id="adminLock">
+      <div class="admin-row">
+        <input type="password" id="adminKey" autocomplete="off" placeholder="ADMIN_KEY">
+        <button type="button" id="adminUnlock">Unlock</button>
+      </div>
+      <div class="field-hint" id="adminMsg"></div>
+    </div>
+    <div class="admin-body" id="adminBody" hidden>
+      <div class="admin-block">
+        <div class="admin-title">Raw paste</div>
+        <div class="admin-row">
+          <input type="text" id="rawUrl" placeholder="https://... (any public raw link)" spellcheck="false">
+          <button type="button" id="rawFetch">Fetch</button>
+        </div>
+      </div>
+      <div class="admin-block">
+        <div class="admin-title">Fetch list</div>
+        <div class="admin-list" id="adminList"></div>
+        <div class="admin-row">
+          <input type="text" id="entryLabel" placeholder="Label" maxlength="60">
+          <input type="text" id="entryUrl" placeholder="https://... raw link" spellcheck="false">
+          <button type="button" id="entryAdd">Add</button>
+        </div>
+      </div>
+      <textarea id="adminOut" readonly spellcheck="false" placeholder="Fetched text appears here"></textarea>
+    </div>
+  </section>
 
   <div class="layout">
 
@@ -950,6 +994,127 @@
     a.click();
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
   });
+</script>
+<script>
+(function () {
+  // The admin key lives only in this variable: never stored, never logged.
+  var KEY = '';
+  var $ = function (id) { return document.getElementById(id); };
+
+  function call(method, path, body) {
+    return fetch(path, {
+      method: method,
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Key': KEY },
+      body: body ? JSON.stringify(body) : undefined
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        return { ok: r.ok, status: r.status, data: data };
+      });
+    });
+  }
+  function errText(res) {
+    if (res.status === 401) return 'wrong admin key';
+    if (res.status === 429) return 'too many attempts, try later';
+    if (res.status === 503) return (res.data && res.data.error) || 'admin is not available';
+    return (res.data && res.data.error) || ('request failed (' + res.status + ')');
+  }
+  function setMsg(text) { $('adminMsg').textContent = text || ''; }
+  function setOut(text) { $('adminOut').value = text; }
+
+  function renderList(entries) {
+    var box = $('adminList');
+    box.textContent = '';
+    if (!entries.length) {
+      var empty = document.createElement('div');
+      empty.className = 'field-hint';
+      empty.textContent = 'No links saved yet.';
+      box.appendChild(empty);
+      return;
+    }
+    entries.forEach(function (e) {
+      var row = document.createElement('div');
+      row.className = 'admin-item';
+      var lbl = document.createElement('span'); lbl.className = 'lbl'; lbl.textContent = e.label;
+      var url = document.createElement('span'); url.className = 'url'; url.textContent = e.url;
+      var fetchBtn = document.createElement('button');
+      fetchBtn.type = 'button'; fetchBtn.textContent = 'Fetch';
+      fetchBtn.addEventListener('click', function () { fetchEntry(e.id, e.label); });
+      var rm = document.createElement('button');
+      rm.type = 'button'; rm.textContent = 'Remove';
+      rm.addEventListener('click', function () { removeEntry(e.id); });
+      row.appendChild(lbl); row.appendChild(url); row.appendChild(fetchBtn); row.appendChild(rm);
+      box.appendChild(row);
+    });
+  }
+
+  function loadList() {
+    return call('GET', '/admin/api/entries').then(function (res) {
+      if (!res.ok) { setMsg(errText(res)); return; }
+      renderList(res.data.entries || []);
+    });
+  }
+
+  function showPanel() {
+    $('adminLock').hidden = true;
+    $('adminBody').hidden = false;
+    $('adminState').textContent = 'unlocked';
+    $('adminKey').value = '';
+    setMsg('');
+  }
+
+  $('adminUnlock').addEventListener('click', function () {
+    var candidate = $('adminKey').value;
+    if (!candidate) { setMsg('enter the admin key'); return; }
+    KEY = candidate;
+    call('GET', '/admin/api/entries').then(function (res) {
+      if (!res.ok) { KEY = ''; setMsg(errText(res)); return; }
+      showPanel();
+      renderList(res.data.entries || []);
+    }).catch(function () { KEY = ''; setMsg('server unreachable'); });
+  });
+  $('adminKey').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('adminUnlock').click(); });
+
+  // Raw paste: fetches the link every time the button is pressed.
+  $('rawFetch').addEventListener('click', function () {
+    var url = $('rawUrl').value.trim();
+    if (!url) { setOut('enter a raw link first'); return; }
+    setOut('fetching...');
+    call('POST', '/admin/api/fetch', { url: url }).then(function (res) {
+      if (!res.ok) { setOut('error: ' + errText(res)); return; }
+      setOut(res.data.text);
+    }).catch(function () { setOut('error: server unreachable'); });
+  });
+
+  function fetchEntry(id, label) {
+    setOut('fetching ' + label + '...');
+    call('POST', '/admin/api/entries/' + encodeURIComponent(id) + '/fetch').then(function (res) {
+      if (!res.ok) { setOut('error: ' + errText(res)); return; }
+      setOut(res.data.text);
+    }).catch(function () { setOut('error: server unreachable'); });
+  }
+
+  $('entryAdd').addEventListener('click', function () {
+    var label = $('entryLabel').value.trim();
+    var url = $('entryUrl').value.trim();
+    if (!url) { setMsg('enter a raw link'); return; }
+    call('POST', '/admin/api/entries', { label: label, url: url }).then(function (res) {
+      if (!res.ok) { setMsg(errText(res)); return; }
+      $('entryLabel').value = ''; $('entryUrl').value = '';
+      setMsg('');
+      renderList(res.data.entries || []);
+    }).catch(function () { setMsg('server unreachable'); });
+  });
+
+  function removeEntry(id) {
+    call('DELETE', '/admin/api/entries/' + encodeURIComponent(id)).then(function (res) {
+      if (!res.ok) { setMsg(errText(res)); return; }
+      renderList(res.data.entries || []);
+    }).catch(function () { setMsg('server unreachable'); });
+  }
+
+  // The panel is only revealed by visiting /obfuscator#admin; the server still checks the key.
+  if (location.hash === '#admin') $('admin').hidden = false;
+})();
 </script>
 </body>
 </html>
