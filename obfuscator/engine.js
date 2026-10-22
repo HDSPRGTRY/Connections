@@ -1,6 +1,6 @@
-/* Luau/Lua source obfuscator engine (v7)
- * Source transformer + hybrid VM-shell backend for Luau / Lua.
- * ES3-compatible (browser, Node, cscript).
+/* Luau/Lua source obfuscator engine (v8)
+ * Source transformer for Luau / Lua (executor-oriented output).
+ * ES3-style syntax: var only, no arrows, let/const, or template literals.
  *
  * API: obfuscate(source, seed, opts) -> { code, stats }
  */
@@ -17,253 +17,1199 @@
   }
 }(typeof self !== 'undefined' ? self : this, function () {
 
+var ALPHA_L = 'abcdefghijklmnopqrstuvwxyz';
+var ALPHA_U = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+function has(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+function contains(arr, v) { for (var i = 0; i < arr.length; i++) if (arr[i] === v) return true; return false; }
+function isAlpha(c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_'; }
+function isDigit(c) { return c >= '0' && c <= '9'; }
+function isAlnum(c) { return isAlpha(c) || isDigit(c); }
+
+var KEYWORDS = {'and':1,'break':1,'do':1,'else':1,'elseif':1,'end':1,
+  'false':1,'for':1,'function':1,'goto':1,'if':1,'in':1,'local':1,'nil':1,
+  'not':1,'or':1,'repeat':1,'return':1,'then':1,'true':1,'until':1,
+  'while':1,'continue':1};
+var COMPLETE_K = {'ID':1,'NUM':1,'STR':1,'LSTR':1};
+var COMPLETE_V = {'true':1,'false':1,'nil':1,'...':1,')':1,']':1,'}':1,'break':1,'end':1};
+var BLOCK_KW = {'local':1,'function':1,'if':1,'while':1,'for':1,'repeat':1,
+  'do':1,'end':1,'else':1,'elseif':1,'until':1,'return':1,'break':1,'then':1,'in':1};
+var NEVER = {'self':1,'_G':1,'_VERSION':1};
+var ENV_NAMES = {'request':1,'writefile':1,'readfile':1,'isfile':1,'loadfile':1,
+  'loadstring':1,'getgenv':1,'http_request':1,'syn':1,'game':1,'wait':1,'task':1,
+  'require':1,'print':1,'warn':1,'error':1,'pcall':1,'xpcall':1,'select':1,'type':1,
+  'typeof':1,'tostring':1,'tonumber':1,'tick':1,'time':1,'os':1,'math':1,'string':1,
+  'table':1,'coroutine':1,'bit32':1,'debug':1,'getfenv':1,'setfenv':1};
+var STARTERS = {'local':1,'if':1,'while':1,'for':1,'repeat':1,'function':1};
+var BLOCK_OPEN = {'function':1,'if':1,'do':1,'repeat':1};
+var SIMPLE_ESC = {'a':7,'b':8,'f':12,'n':10,'r':13,'t':9,'v':11,'\\':92,
+  '"':34,"'":39,'\n':10};
+
+// ---------- tokenizer ----------
+function tokenize(s) {
+  var toks = [], i = 0, n = s.length, c, j, m, d, w, lo, mo, sym, seg, raw, q, two, three;
+  function longOpen(p) {
+    if (s.charAt(p) !== '[') return null;
+    var k = p + 1, eq = '';
+    while (s.charAt(k) === '=') { eq += '='; k++; }
+    if (s.charAt(k) !== '[') return null;
+    return { eq: eq, end: k + 1 };
+  }
+  while (i < n) {
+    c = s.charAt(i);
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\n' || c === '\v' || c === '\f') { i++; continue; }
+    if (c === '-' && s.charAt(i + 1) === '-') {
+      mo = s.charAt(i + 2) === '[' ? longOpen(i + 2) : null;
+      if (mo) {
+        j = s.indexOf(']' + mo.eq + ']', mo.end);
+        if (j < 0) throw new Error('lex: unterminated long comment');
+        i = j + mo.eq.length + 2; continue;
+      }
+      j = s.indexOf('\n', i);
+      i = j < 0 ? n : j;
+      continue;
+    }
+    lo = longOpen(i);
+    if (lo) {
+      j = s.indexOf(']' + lo.eq + ']', lo.end);
+      if (j < 0) throw new Error('lex: unterminated long string');
+      toks.push(['LSTR', s.substring(i, j + lo.eq.length + 2), lo.eq]);
+      i = j + lo.eq.length + 2;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      q = c; j = i + 1; raw = '';
+      for (;;) {
+        if (j >= n) throw new Error('lex: unterminated string');
+        d = s.charAt(j);
+        if (d === '\\') { raw += d + s.charAt(j + 1); j += 2; continue; }
+        if (d === q) break;
+        if (d === '\n') throw new Error('lex: newline in string');
+        raw += d; j++;
+      }
+      toks.push(['STR', s.substring(i, j + 1), q, raw]);
+      i = j + 1;
+      continue;
+    }
+    if (isDigit(c) || (c === '.' && isDigit(s.charAt(i + 1)))) {
+      seg = s.substr(i, 256);
+      m = /^0[xX][0-9a-fA-F_]+/.exec(seg) || /^0[bB][01_]+/.exec(seg) ||
+          /^(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9][0-9_]*)(?:[eE][+-]?[0-9]+)?/.exec(seg);
+      toks.push(['NUM', m[0]]); i += m[0].length;
+      continue;
+    }
+    if (isAlpha(c)) {
+      j = i;
+      while (j < n && isAlnum(s.charAt(j))) j++;
+      w = s.substring(i, j);
+      toks.push([has(KEYWORDS, w) ? 'KW' : 'ID', w]);
+      i = j;
+      continue;
+    }
+    three = s.substr(i, 3); two = s.substr(i, 2); sym = null;
+    if (three === '...' || three === '..=') sym = three;
+    else if (two === '..' || two === '==' || two === '~=' || two === '<=' || two === '>=' ||
+             two === '//' || two === '+=' || two === '-=' || two === '*=' || two === '/=' ||
+             two === '%=' || two === '^=') sym = two;
+    if (!sym && two === '::') throw new Error('lex: labels / type annotations unsupported');
+    if (sym) { toks.push(['SYM', sym]); i += sym.length; continue; }
+    if ('(){}[];:,+-*/%^#<>=.'.indexOf(c) >= 0) { toks.push(['SYM', c]); i++; continue; }
+    if (s.charCodeAt(i) > 127) throw new Error('lex: non-ascii outside string');
+    throw new Error('lex: bad char ' + c);
+  }
+  return toks;
+}
+
+// ---------- string helpers ----------
+function decodeShort(raw) {
+  var out = [], i = 0, n = raw.length, e, mm, c, cc;
+  while (i < n) {
+    c = raw.charAt(i);
+    if (c !== '\\') {
+      cc = raw.charCodeAt(i);
+      if (cc < 128) out.push(cc);
+      else if (cc < 2048) out.push(192 | (cc >> 6), 128 | (cc & 63));
+      else out.push(224 | (cc >> 12), 128 | ((cc >> 6) & 63), 128 | (cc & 63));
+      i++;
+      continue;
+    }
+    if (i + 1 >= n) return null;
+    e = raw.charAt(i + 1);
+    if (has(SIMPLE_ESC, e)) { out.push(SIMPLE_ESC[e]); i += 2; }
+    else if (e === 'x' || e === 'u' || e === 'z') return null;
+    else if (e >= '0' && e <= '9') {
+      mm = /^[0-9]{1,3}/.exec(raw.substring(i + 1));
+      out.push(parseInt(mm[0], 10) % 256);
+      i += 1 + mm[0].length;
+    } else return null;
+  }
+  return out;
+}
+
+function utf8bytes(str) {
+  var data = [], i, cc;
+  for (i = 0; i < str.length; i++) {
+    cc = str.charCodeAt(i);
+    if (cc < 128) data.push(cc);
+    else if (cc < 2048) data.push(192 | (cc >> 6), 128 | (cc & 63));
+    else data.push(224 | (cc >> 12), 128 | ((cc >> 6) & 63), 128 | (cc & 63));
+  }
+  return data;
+}
+
+// ---------- expression parser ----------
+// Works on source tokens from tokenize(): [kind, text, ...]. Produces an AST that
+// emitExpr() turns back into tokens. Binary priorities follow Lua 5.3's table, so
+// precedence and right-associativity of '..' and '^' are preserved. Every
+// sub-expression that is an operator node is parenthesized on output, which keeps
+// the tree identical regardless of context.
+var BINPREC = {
+  'or': [1, 1], 'and': [2, 2],
+  '<': [3, 3], '>': [3, 3], '<=': [3, 3], '>=': [3, 3], '~=': [3, 3], '==': [3, 3],
+  '|': [4, 4], '~': [5, 5], '&': [6, 6], '<<': [7, 7], '>>': [7, 7],
+  '..': [9, 8], '+': [10, 10], '-': [10, 10],
+  '*': [11, 11], '/': [11, 11], '//': [11, 11], '%': [11, 11],
+  '^': [14, 13]
+};
+var UNARY_PREC = 12;
+
+// Block-opening keywords for skipping over a function literal's body.
+function rawFunctionEnd(toks, st) {
+  var d = 0, k, t;
+  for (k = st; k < toks.length; k++) {
+    t = toks[k][1];
+    if (toks[k][0] !== 'KW' && toks[k][0] !== 'SYM') continue;
+    if (has(BLOCK_OPEN, t)) d++;
+    else if (t === 'end' || t === 'until') { d--; if (d === 0) return k; }
+  }
+  throw new Error('parse: unterminated function literal');
+}
+
+function parseCallArgs(toks, st) {
+  var t = toks[st], args = [], r, pos;
+  if (t && t[0] === 'STR') return { args: [{ k: 'tok', tok: t }], pos: st + 1 };
+  if (t && t[0] === 'LSTR') return { args: [{ k: 'tok', tok: t }], pos: st + 1 };
+  if (t && t[1] === '{') { r = parseTableAt(toks, st); return { args: [r.node], pos: r.pos }; }
+  if (!t || t[1] !== '(') throw new Error('parse: expected call arguments');
+  pos = st + 1;
+  if (toks[pos] && toks[pos][1] === ')') return { args: args, pos: pos + 1 };
+  for (;;) {
+    r = parseExprAt(toks, pos, 0);
+    args.push(r.node);
+    pos = r.pos;
+    if (toks[pos] && toks[pos][1] === ',') { pos++; continue; }
+    if (toks[pos] && toks[pos][1] === ')') return { args: args, pos: pos + 1 };
+    throw new Error('parse: expected , or ) in arguments');
+  }
+}
+
+function parseTableAt(toks, st) {
+  var items = [], pos = st + 1, t, r, key, nx;
+  if (!toks[st] || toks[st][1] !== '{') throw new Error('parse: expected {');
+  while (toks[pos] && toks[pos][1] !== '}') {
+    t = toks[pos];
+    nx = toks[pos + 1];
+    if (t[0] === 'ID' && nx && nx[1] === '=') {
+      r = parseExprAt(toks, pos + 2, 0);
+      items.push({ key: { k: 'tok', tok: t }, val: r.node, named: true });
+      pos = r.pos;
+    } else if (t[1] === '[') {
+      r = parseExprAt(toks, pos + 1, 0);
+      key = r.node;
+      if (!toks[r.pos] || toks[r.pos][1] !== ']') throw new Error('parse: expected ] in table key');
+      if (!toks[r.pos + 1] || toks[r.pos + 1][1] !== '=') throw new Error('parse: expected = in table key');
+      r = parseExprAt(toks, r.pos + 2, 0);
+      items.push({ key: key, val: r.node, named: false, bracket: true });
+      pos = r.pos;
+    } else {
+      r = parseExprAt(toks, pos, 0);
+      items.push({ key: null, val: r.node, named: false });
+      pos = r.pos;
+    }
+    if (toks[pos] && (toks[pos][1] === ',' || toks[pos][1] === ';')) { pos++; continue; }
+    break;
+  }
+  if (!toks[pos] || toks[pos][1] !== '}') throw new Error('parse: expected } in table');
+  return { node: { k: 'table', items: items }, pos: pos + 1 };
+}
+
+function parsePrimaryAt(toks, st) {
+  var t = toks[st], node, pos, r, a, nm;
+  if (!t) throw new Error('parse: unexpected end of expression');
+  if (t[0] === 'NUM' || t[0] === 'STR' || t[0] === 'LSTR') { node = { k: 'tok', tok: t }; pos = st + 1; }
+  else if (t[0] === 'KW' && (t[1] === 'nil' || t[1] === 'true' || t[1] === 'false')) { node = { k: 'tok', tok: t }; pos = st + 1; }
+  else if (t[0] === 'SYM' && t[1] === '...') { node = { k: 'tok', tok: t }; pos = st + 1; }
+  else if (t[0] === 'ID') { node = { k: 'name', tok: t }; pos = st + 1; }
+  else if (t[0] === 'SYM' && t[1] === '(') {
+    r = parseExprAt(toks, st + 1, 0);
+    if (!toks[r.pos] || toks[r.pos][1] !== ')') throw new Error('parse: expected )');
+    node = { k: 'paren', e: r.node };
+    pos = r.pos + 1;
+  }
+  else if (t[0] === 'SYM' && t[1] === '{') { r = parseTableAt(toks, st); node = r.node; pos = r.pos; }
+  else if (t[0] === 'KW' && t[1] === 'function') {
+    r = rawFunctionEnd(toks, st);
+    node = { k: 'raw', toks: toks.slice(st, r + 1) };
+    pos = r + 1;
+  }
+  else throw new Error('parse: unexpected token ' + t[1]);
+
+  // suffixes: .name  [expr]  :name args  args
+  for (;;) {
+    t = toks[pos];
+    if (!t) break;
+    if (t[0] === 'SYM' && t[1] === '.') {
+      nm = toks[pos + 1];
+      if (!nm || nm[0] !== 'ID') throw new Error('parse: expected name after .');
+      node = { k: 'index', o: node, key: { k: 'tok', tok: [ 'STR', nm[1] ] }, dot: nm };
+      pos += 2;
+    } else if (t[0] === 'SYM' && t[1] === '[') {
+      r = parseExprAt(toks, pos + 1, 0);
+      if (!toks[r.pos] || toks[r.pos][1] !== ']') throw new Error('parse: expected ]');
+      node = { k: 'index', o: node, key: r.node };
+      pos = r.pos + 1;
+    } else if (t[0] === 'SYM' && t[1] === ':') {
+      nm = toks[pos + 1];
+      if (!nm || nm[0] !== 'ID') throw new Error('parse: expected name after :');
+      a = parseCallArgs(toks, pos + 2);
+      node = { k: 'call', f: node, method: nm, args: a.args };
+      pos = a.pos;
+    } else if ((t[0] === 'SYM' && (t[1] === '(' || t[1] === '{')) || t[0] === 'STR' || t[0] === 'LSTR') {
+      a = parseCallArgs(toks, pos);
+      node = { k: 'call', f: node, args: a.args };
+      pos = a.pos;
+    } else break;
+  }
+  return { node: node, pos: pos };
+}
+
+function parseUnaryAt(toks, st) {
+  var t = toks[st], r;
+  if (t && ((t[0] === 'KW' && t[1] === 'not') || (t[0] === 'SYM' && (t[1] === '-' || t[1] === '#' || t[1] === '~')))) {
+    r = parseExprAt(toks, st + 1, UNARY_PREC);
+    return { node: { k: 'un', op: t[1], e: r.node, tok: t }, pos: r.pos };
+  }
+  return parsePrimaryAt(toks, st);
+}
+
+// Precedence climbing. 'limit' is the minimum left priority an operator needs.
+function parseExprAt(toks, st, limit) {
+  var r = parseUnaryAt(toks, st), left = r.node, pos = r.pos, t, op, pr, rr;
+  for (;;) {
+    t = toks[pos];
+    if (!t) break;
+    if (!((t[0] === 'SYM' || t[0] === 'KW') && has(BINPREC, t[1]))) break;
+    op = t[1];
+    pr = BINPREC[op];
+    if (pr[0] <= limit) break;
+    rr = parseExprAt(toks, pos + 1, pr[1]);
+    left = { k: 'bin', op: op, l: left, r: rr.node, tok: t };
+    pos = rr.pos;
+  }
+  return { node: left, pos: pos };
+}
+
+// Emit AST back to tokens in [kind, text] form.
+function emitExpr(n) {
+  var out = [], i, child;
+  function wrap(c) {
+    if (c.k === 'bin' || c.k === 'un') { out.push(['SYM', '(']); emitInto(c); out.push(['SYM', ')']); }
+    else emitInto(c);
+  }
+  function emitInto(c) {
+    var j;
+    switch (c.k) {
+      case 'tok': out.push(c.tok); break;
+      case 'name': out.push(c.tok); break;
+      case 'raw': for (j = 0; j < c.toks.length; j++) out.push(c.toks[j]); break;
+      case 'paren': out.push(['SYM', '(']); emitInto(c.e); out.push(['SYM', ')']); break;
+      case 'un': out.push(c.tok); wrap(c.e); break;
+      case 'bin': wrap(c.l); out.push(c.tok); wrap(c.r); break;
+      case 'index':
+        wrap(c.o);
+        if (c.dot) { out.push(['SYM', '.'], c.dot); }
+        else { out.push(['SYM', '[']); emitInto(c.key); out.push(['SYM', ']']); }
+        break;
+      case 'call':
+        wrap(c.f);
+        if (c.method) out.push(['SYM', ':'], c.method);
+        if (c.args.length === 1 && (c.args[0].k === 'tok' && (c.args[0].tok[0] === 'STR' || c.args[0].tok[0] === 'LSTR'))) {
+          out.push(c.args[0].tok);
+        } else if (c.args.length === 1 && c.args[0].k === 'table') {
+          emitInto(c.args[0]);
+        } else {
+          out.push(['SYM', '(']);
+          for (i = 0; i < c.args.length; i++) { if (i) out.push(['SYM', ',']); emitInto(c.args[i]); }
+          out.push(['SYM', ')']);
+        }
+        break;
+      case 'table':
+        out.push(['SYM', '{']);
+        for (i = 0; i < c.items.length; i++) {
+          child = c.items[i];
+          if (i) out.push(['SYM', ',']);
+          if (child.named) { out.push(child.key.tok, ['SYM', '=']); emitInto(child.val); }
+          else if (child.bracket) { out.push(['SYM', '[']); emitInto(child.key); out.push(['SYM', ']'], ['SYM', '=']); emitInto(child.val); }
+          else emitInto(child.val);
+        }
+        out.push(['SYM', '}']);
+        break;
+      default: throw new Error('emit: unknown node ' + c.k);
+    }
+  }
+  emitInto(n);
+  return out;
+}
+
+// ---------- VM layer ----------
+// Functions inside the supported subset are compiled to register bytecode. Each
+// original body is replaced by a call into one interpreter emitted at the top of
+// the chunk. Opcode numbers are permuted per build. A function that does not fit
+// the subset (nested functions, varargs, goto, free names that are also declared
+// as locals elsewhere, multi-value positions) is left alone, so the layer is
+// always safe to skip per function.
+//
+// Known differences from native execution: error messages and tracebacks differ,
+// and free globals are read from getgenv() (or _G) rather than the script's own
+// environment. The layer is therefore opt-in (opts.vm).
+var VM_OPS = ['MOVE','LOADK','LOADNIL','GETG','SETG','GETT','SETT','SELF','TABLE',
+  'ADD','SUB','MUL','DIV','IDIV','MOD','POW','CONCAT','EQ','LT','LE',
+  'UNM','NOT','LEN','JMP','JF','JT','CALL','CALLP','CALLM','CALLMP','RETN','RETM','RET0','FORPREP','FORSTEP','APPEND','SETALL','VARG','VARGP','CLOSURE'];
+var VM_BIN = {'+':'ADD','-':'SUB','*':'MUL','/':'DIV','//':'IDIV','%':'MOD','^':'POW','..':'CONCAT'};
+var VM_END_KW = {'end':1,'else':1,'elseif':1,'until':1};
+
+function vmFail(m) { throw new Error('vm: ' + m); }
+function isKw(t, w) { return !!t && t[0] === 'KW' && t[1] === w; }
+function isSym(t, s) { return !!t && t[0] === 'SYM' && t[1] === s; }
+function vmStrTok(s) { return ['STR', vmLuaStr(s), '"', s]; }
+function vmNumTok(n) { return ['NUM', String(n)]; }
+
+function vmLuaStr(s) {
+  var out = '"', i, c, code;
+  for (i = 0; i < s.length; i++) {
+    c = s.charAt(i); code = s.charCodeAt(i);
+    if (c === '"' || c === '\\') out += '\\' + c;
+    else if (code < 32 || code > 126) out += '\\' + ('00' + code).slice(-3);
+    else out += c;
+  }
+  return out + '"';
+}
+
+// ----- statement parser (works on the same token format as parseExprAt) -----
+function vmExpect(toks, pos, w) {
+  if (!toks[pos] || toks[pos][1] !== w) vmFail('expected ' + w);
+  return pos + 1;
+}
+
+function vmExplist(toks, pos) {
+  var list = [], r;
+  for (;;) {
+    r = parseExprAt(toks, pos, 0);
+    list.push(r.node);
+    pos = r.pos;
+    if (isSym(toks[pos], ',')) { pos++; continue; }
+    return { list: list, pos: pos };
+  }
+}
+
+function vmBlock(toks, pos, stops) {
+  var list = [], st, t, q;
+  for (;;) {
+    t = toks[pos];
+    if (!t) break;
+    if (t[0] === 'KW' && has(stops, t[1])) break;
+    if (isSym(t, ';')) { pos++; continue; }
+    st = vmStmt(toks, pos);
+    list.push(st.node);
+    pos = st.pos;
+    if (st.node.k === 'return') {
+      q = pos;
+      while (isSym(toks[q], ';')) q++;
+      if (toks[q] && !(toks[q][0] === 'KW' && has(stops, toks[q][1]))) vmFail('statement after return');
+      pos = q;
+    }
+  }
+  return { list: list, pos: pos };
+}
+
+function vmStmt(toks, pos) {
+  var t = toks[pos], nx = toks[pos + 1], r, r2, names, exprs, clauses, body, els, p, targets, e1, e2, e3, name, i, endish;
+  if (t[0] === 'KW') {
+    switch (t[1]) {
+      case 'local':
+        if (isKw(nx, 'function')) {
+          if (!toks[pos + 2] || toks[pos + 2][0] !== 'ID') vmFail('local function name');
+          r = rawFunctionEnd(toks, pos + 1);
+          return { node: { k: 'localfn', name: toks[pos + 2][1], fn: toks.slice(pos + 1, r + 1) }, pos: r + 1 };
+        }
+        names = []; pos++;
+        for (;;) {
+          if (!toks[pos] || toks[pos][0] !== 'ID') vmFail('local name');
+          names.push(toks[pos][1]);
+          pos++;
+          if (isSym(toks[pos], '<')) vmFail('attribute');
+          if (isSym(toks[pos], ',')) { pos++; continue; }
+          break;
+        }
+        exprs = [];
+        if (isSym(toks[pos], '=')) { r = vmExplist(toks, pos + 1); exprs = r.list; pos = r.pos; }
+        return { node: { k: 'local', names: names, exprs: exprs }, pos: pos };
+      case 'if':
+        clauses = [];
+        r = parseExprAt(toks, pos + 1, 0);
+        pos = vmExpect(toks, r.pos, 'then');
+        body = vmBlock(toks, pos, { 'elseif': 1, 'else': 1, 'end': 1 });
+        clauses.push({ cond: r.node, body: body.list });
+        pos = body.pos;
+        while (isKw(toks[pos], 'elseif')) {
+          r = parseExprAt(toks, pos + 1, 0);
+          pos = vmExpect(toks, r.pos, 'then');
+          body = vmBlock(toks, pos, { 'elseif': 1, 'else': 1, 'end': 1 });
+          clauses.push({ cond: r.node, body: body.list });
+          pos = body.pos;
+        }
+        els = null;
+        if (isKw(toks[pos], 'else')) {
+          body = vmBlock(toks, pos + 1, { 'end': 1 });
+          els = body.list;
+          pos = body.pos;
+        }
+        pos = vmExpect(toks, pos, 'end');
+        return { node: { k: 'if', clauses: clauses, els: els }, pos: pos };
+      case 'while':
+        r = parseExprAt(toks, pos + 1, 0);
+        pos = vmExpect(toks, r.pos, 'do');
+        body = vmBlock(toks, pos, { 'end': 1 });
+        pos = vmExpect(toks, body.pos, 'end');
+        return { node: { k: 'while', cond: r.node, body: body.list }, pos: pos };
+      case 'do':
+        body = vmBlock(toks, pos + 1, { 'end': 1 });
+        pos = vmExpect(toks, body.pos, 'end');
+        return { node: { k: 'do', body: body.list }, pos: pos };
+      case 'repeat':
+        body = vmBlock(toks, pos + 1, { 'until': 1 });
+        pos = vmExpect(toks, body.pos, 'until');
+        r = parseExprAt(toks, pos, 0);
+        return { node: { k: 'repeat', body: body.list, cond: r.node }, pos: r.pos };
+      case 'for':
+        if (!nx || nx[0] !== 'ID' || !isSym(toks[pos + 2], '=')) vmFail('generic for');
+        name = nx[1];
+        r = parseExprAt(toks, pos + 3, 0);
+        e1 = r.node;
+        pos = vmExpect(toks, r.pos, ',');
+        r = parseExprAt(toks, pos, 0);
+        e2 = r.node; pos = r.pos;
+        e3 = null;
+        if (isSym(toks[pos], ',')) { r = parseExprAt(toks, pos + 1, 0); e3 = r.node; pos = r.pos; }
+        pos = vmExpect(toks, pos, 'do');
+        body = vmBlock(toks, pos, { 'end': 1 });
+        pos = vmExpect(toks, body.pos, 'end');
+        return { node: { k: 'fornum', name: name, e1: e1, e2: e2, e3: e3, body: body.list }, pos: pos };
+      case 'return':
+        pos++;
+        endish = !toks[pos] || (toks[pos][0] === 'KW' && has(VM_END_KW, toks[pos][1])) || isSym(toks[pos], ';');
+        exprs = [];
+        if (!endish) { r = vmExplist(toks, pos); exprs = r.list; pos = r.pos; }
+        return { node: { k: 'return', exprs: exprs }, pos: pos };
+      case 'function': {
+        // function a.b:c(...) ... end  ->  a.b.c = function(...) ... end
+        if (!toks[pos + 1] || toks[pos + 1][0] !== 'ID') vmFail('function name');
+        var target = { k: 'name', tok: toks[pos + 1] }, q = pos + 2, method = false;
+        while (isSym(toks[q], '.') || isSym(toks[q], ':')) {
+          if (!toks[q + 1] || toks[q + 1][0] !== 'ID') vmFail('function name');
+          if (toks[q][1] === ':') method = true;
+          target = { k: 'index', o: target, key: { k: 'tok', tok: ['STR', toks[q + 1][1]] } };
+          q += 2;
+          if (method) break;
+        }
+        r = rawFunctionEnd(toks, pos);
+        return { node: { k: 'assign', targets: [target], exprs: [{ k: 'raw', toks: toks.slice(pos, r + 1) }] }, pos: r + 1 };
+      }
+      case 'break':
+        return { node: { k: 'break' }, pos: pos + 1 };
+      default:
+        vmFail('unsupported keyword ' + t[1]);
+    }
+  }
+  p = parsePrimaryAt(toks, pos);
+  if (isSym(toks[p.pos], ',') || isSym(toks[p.pos], '=')) {
+    targets = [p.node];
+    pos = p.pos;
+    while (isSym(toks[pos], ',')) {
+      p = parsePrimaryAt(toks, pos + 1);
+      targets.push(p.node);
+      pos = p.pos;
+    }
+    for (i = 0; i < targets.length; i++) {
+      if (targets[i].k !== 'name' && targets[i].k !== 'index') vmFail('bad assignment target');
+    }
+    pos = vmExpect(toks, pos, '=');
+    r = vmExplist(toks, pos);
+    return { node: { k: 'assign', targets: targets, exprs: r.list }, pos: r.pos };
+  }
+  if (p.node.k !== 'call') vmFail('expression statement');
+  return { node: { k: 'callstat', e: p.node }, pos: p.pos };
+}
+
+// ----- compiler: AST -> flat bytecode (4 slots per instruction) -----
+// Operand conventions: registers are 1-based, K indices are 1-based, jump targets
+// are slot indices (1-based index of the opcode slot).
+function isMulti(n) { return n.k === 'call' || (n.k === 'tok' && n.tok[0] === 'SYM' && n.tok[1] === '...'); }
+
+function vmCompileBody(params, toks, all, isVararg, reg) {
+  var body = vmBlock(toks, 0, {}).list;
+  var code = [], consts = [], cidx = {}, scopes = [], top = 1, loops = [], i;
+
+  function here() { return code.length + 1; }
+  function emit(op, a, b, c) { var s = here(); code.push(op, a || 0, b || 0, c || 0); return s; }
+  function patch(slot, field, v) { code[slot - 1 + (field === 'a' ? 1 : field === 'b' ? 2 : 3)] = v; }
+  function alloc() { var r = top; top++; return r; }
+  function kidx(tok) {
+    var key = tok[0] + '\u0001' + tok[1];
+    if (!has(cidx, key)) { consts.push(tok); cidx[key] = consts.length; }
+    return cidx[key];
+  }
+  function resolve(nm) {
+    var s, m;
+    for (s = scopes.length - 1; s >= 0; s--) {
+      m = scopes[s].m;
+      if (has(m, nm)) return m[nm];
+    }
+    return null;
+  }
+  function pushScope() { scopes.push({ m: {} }); return top; }
+  function popScope(sv) { scopes.pop(); top = sv; }
+  function bindLocal(nm, reg) { scopes[scopes.length - 1].m[nm] = reg; }
+
+  // pack=true leaves all results of the call packed as {n=..., ...} in the base register
+  // Packs every value of a multi-value expression into register pk.
+  function packOf(node, pk) {
+    var r;
+    if (node.k === 'tok') {
+      if (!isVararg) vmFail('... outside a vararg function');
+      emit('VARGP', pk);
+      return;
+    }
+    r = compileCall(node, true);
+    emit('MOVE', pk, r);
+  }
+
+  function compileCall(n, pack) {
+    var base = alloc(), nfix = 0, rr, i2, last, lastMulti, pk, r;
+    cexpr(n.f, base);
+    if (n.method) {
+      rr = alloc();
+      emit('SELF', base, base, kidx(vmStrTok(n.method[1])));
+      nfix = 1;
+    }
+    last = n.args.length - 1;
+    lastMulti = last >= 0 && isMulti(n.args[last]);
+    for (i2 = 0; i2 < n.args.length; i2++) {
+      if (lastMulti && i2 === last) break;
+      rr = alloc();
+      cexpr(n.args[i2], rr);
+      nfix++;
+    }
+    if (lastMulti) {
+      pk = alloc();
+      packOf(n.args[last], pk);
+      top = pk + 1;
+      emit(pack ? 'CALLMP' : 'CALLM', base, nfix);
+    } else {
+      emit(pack ? 'CALLP' : 'CALL', base, nfix);
+    }
+    top = base + 1;
+    return base;
+  }
+
+  // Evaluates exprs into the already allocated registers dsts. A trailing call that
+  // must supply several values is packed once and unpacked by index.
+  function evalList(exprs, dsts) {
+    var i2, e, pk, r, key, ex, j, n = dsts.length;
+    for (i2 = 0; i2 < exprs.length; i2++) {
+      e = exprs[i2];
+      if (i2 === exprs.length - 1 && isMulti(e) && n > exprs.length) {
+        pk = alloc();
+        packOf(e, pk);
+        top = pk + 1;
+        for (j = i2; j < n; j++) {
+          key = alloc();
+          emit('LOADK', key, kidx(vmNumTok(j - i2 + 1)));
+          emit('GETT', dsts[j], pk, key);
+          top = key;
+        }
+        return;
+      }
+      if (i2 < n) cexpr(e, dsts[i2]);
+      else { ex = alloc(); cexpr(e, ex); top = ex; }
+    }
+    for (j = exprs.length; j < n; j++) emit('LOADNIL', dsts[j]);
+  }
+
+  function compileTable(n, dst) {
+    var i2, it, kr, vr, pos = 1, pk, r;
+    for (i2 = 0; i2 < n.items.length; i2++) {
+      it = n.items[i2];
+      if (it.key === null && i2 === n.items.length - 1 && isMulti(it.val)) {
+        pk = alloc();
+        packOf(it.val, pk);
+        // a table that is only a multi-value tail is built in one step, like the native constructor
+        if (n.items.length === 1) emit('SETALL', dst, pk);
+        else emit('APPEND', dst, pk, pos);
+        top = pk;
+        continue;
+      }
+      if (it.key === null) {
+        kr = alloc();
+        emit('LOADK', kr, kidx(vmNumTok(pos)));
+        pos++;
+      } else if (it.named) {
+        kr = alloc();
+        emit('LOADK', kr, kidx(vmStrTok(it.key.tok[1])));
+      } else {
+        kr = alloc();
+        cexpr(it.key, kr);
+      }
+      vr = alloc();
+      cexpr(it.val, vr);
+      emit('SETT', dst, kr, vr);
+      top = kr;
+    }
+  }
+
+  function cexpr(n, dst) {
+    var t0 = top, r1, r2, op, tk, nm, s2;
+    switch (n.k) {
+      case 'tok':
+        tk = n.tok;
+        if (tk[0] === 'STR' && tk.length < 4) tk = vmStrTok(tk[1]);
+        if (tk[0] === 'KW' && tk[1] === 'nil') emit('LOADNIL', dst);
+        else if (tk[0] === 'SYM' && tk[1] === '...') {
+          if (!isVararg) vmFail('... outside a vararg function');
+          emit('VARG', dst);
+        }
+        else emit('LOADK', dst, kidx(tk));
+        break;
+      case 'name':
+        nm = n.tok[1];
+        r1 = resolve(nm);
+        if (r1 !== null) emit('MOVE', dst, r1);
+        else {
+          if (has(all, nm)) vmFail('free name also declared as a local: ' + nm);
+          emit('GETG', dst, kidx(vmStrTok(nm)));
+        }
+        break;
+      case 'paren':
+        cexpr(n.e, dst);
+        break;
+      case 'un':
+        op = n.op === '-' ? 'UNM' : n.op === '#' ? 'LEN' : n.op === 'not' ? 'NOT' : null;
+        if (!op) vmFail('unary ' + n.op);
+        r1 = alloc();
+        cexpr(n.e, r1);
+        emit(op, dst, r1);
+        break;
+      case 'bin':
+        if (n.op === 'and' || n.op === 'or') {
+          cexpr(n.l, dst);
+          s2 = emit(n.op === 'and' ? 'JF' : 'JT', dst, 0);
+          cexpr(n.r, dst);
+          patch(s2, 'b', here());
+          break;
+        }
+        r1 = alloc(); cexpr(n.l, r1);
+        r2 = alloc(); cexpr(n.r, r2);
+        if (has(VM_BIN, n.op)) emit(VM_BIN[n.op], dst, r1, r2);
+        else if (n.op === '==') emit('EQ', dst, r1, r2);
+        else if (n.op === '~=') { emit('EQ', dst, r1, r2); emit('NOT', dst, dst); }
+        else if (n.op === '<') emit('LT', dst, r1, r2);
+        else if (n.op === '>') emit('LT', dst, r2, r1);
+        else if (n.op === '<=') emit('LE', dst, r1, r2);
+        else if (n.op === '>=') emit('LE', dst, r2, r1);
+        else vmFail('operator ' + n.op);
+        break;
+      case 'index':
+        r1 = alloc(); cexpr(n.o, r1);
+        r2 = alloc(); cexpr(n.key, r2);
+        emit('GETT', dst, r1, r2);
+        break;
+      case 'raw':
+        r1 = closureFor(n.toks);
+        emit('CLOSURE', dst, r1.idx, r1.flag);
+        break;
+      case 'call':
+        r1 = compileCall(n, false);
+        emit('MOVE', dst, r1);
+        break;
+      case 'table':
+        emit('TABLE', dst);
+        compileTable(n, dst);
+        break;
+      default:
+        vmFail('expression ' + n.k);
+    }
+    top = t0;
+  }
+
+  // Compiles a nested function literal (no upvalues) as its own VM function.
+  function closureFor(ftoks) {
+    var h = fnHeader(ftoks, 0), body, sub;
+    if (!h) vmFail('bad nested function');
+    body = ftoks.slice(h.close + 1, ftoks.length - 1);
+    sub = vmCompileBody(h.params, body, all, h.vararg, reg);
+    return { idx: reg(sub), flag: h.params.length * 2 + (h.vararg ? 1 : 0) };
+  }
+
+  function stmts(list) { var i2; for (i2 = 0; i2 < list.length; i2++) stmt(list[i2]); }
+  function block(list) { var sv = pushScope(); stmts(list); popScope(sv); }
+
+  function stmt(s) {
+    var t0 = top, i2, regs, info, vr, e, base, o, kr, c, jf, ends, lp, start, endSlot, prep, lim, stp, lv, sv, r1, ex, multi, pk;
+    switch (s.k) {
+      case 'local':
+        regs = [];
+        for (i2 = 0; i2 < s.names.length; i2++) regs.push(alloc());
+        evalList(s.exprs, regs);
+        for (i2 = 0; i2 < s.names.length; i2++) bindLocal(s.names[i2], regs[i2]);
+        top = regs[regs.length - 1] + 1;
+        return;   // the new locals stay allocated until the enclosing scope ends
+      case 'assign':
+        info = [];
+        for (i2 = 0; i2 < s.targets.length; i2++) {
+          e = s.targets[i2];
+          if (e.k === 'name') {
+            r1 = resolve(e.tok[1]);
+            if (r1 !== null) info.push({ kind: 'loc', reg: r1 });
+            else {
+              if (has(all, e.tok[1])) vmFail('free name also declared as a local: ' + e.tok[1]);
+              info.push({ kind: 'glob', name: e.tok[1] });
+            }
+          } else {
+            o = alloc(); cexpr(e.o, o);
+            kr = alloc(); cexpr(e.key, kr);
+            info.push({ kind: 'idx', o: o, k: kr });
+          }
+        }
+        vr = [];
+        for (i2 = 0; i2 < s.targets.length; i2++) vr.push(alloc());
+        evalList(s.exprs, vr);
+        for (i2 = 0; i2 < info.length; i2++) {
+          if (info[i2].kind === 'loc') emit('MOVE', info[i2].reg, vr[i2]);
+          else if (info[i2].kind === 'glob') emit('SETG', vr[i2], kidx(vmStrTok(info[i2].name)));
+          else emit('SETT', info[i2].o, info[i2].k, vr[i2]);
+        }
+        break;
+      case 'localfn':
+        r1 = alloc();
+        bindLocal(s.name, r1);
+        sv = closureFor(s.fn);
+        emit('CLOSURE', r1, sv.idx, sv.flag);
+        top = r1 + 1;
+        return;
+      case 'callstat':
+        compileCall(s.e, false);
+        break;
+      case 'do':
+        block(s.body);
+        break;
+      case 'if':
+        ends = [];
+        for (i2 = 0; i2 < s.clauses.length; i2++) {
+          c = alloc(); cexpr(s.clauses[i2].cond, c);
+          jf = emit('JF', c, 0);
+          top = c;
+          block(s.clauses[i2].body);
+          if (i2 < s.clauses.length - 1 || s.els) ends.push(emit('JMP', 0));
+          patch(jf, 'b', here());
+        }
+        if (s.els) block(s.els);
+        for (i2 = 0; i2 < ends.length; i2++) patch(ends[i2], 'a', here());
+        break;
+      case 'while':
+        start = here();
+        c = alloc(); cexpr(s.cond, c);
+        jf = emit('JF', c, 0);
+        top = c;
+        lp = { breaks: [] };
+        loops.push(lp);
+        block(s.body);
+        loops.pop();
+        emit('JMP', start);
+        endSlot = here();
+        patch(jf, 'b', endSlot);
+        for (i2 = 0; i2 < lp.breaks.length; i2++) patch(lp.breaks[i2], 'a', endSlot);
+        break;
+      case 'repeat':
+        start = here();
+        lp = { breaks: [] };
+        loops.push(lp);
+        sv = pushScope();
+        stmts(s.body);
+        c = alloc(); cexpr(s.cond, c);
+        emit('JF', c, start);
+        top = c;
+        popScope(sv);
+        loops.pop();
+        endSlot = here();
+        for (i2 = 0; i2 < lp.breaks.length; i2++) patch(lp.breaks[i2], 'a', endSlot);
+        break;
+      case 'fornum':
+        base = alloc(); cexpr(s.e1, base);
+        lim = alloc(); cexpr(s.e2, lim);
+        stp = alloc();
+        if (s.e3) cexpr(s.e3, stp);
+        else emit('LOADK', stp, kidx(vmNumTok(1)));
+        prep = emit('FORPREP', base, 0, 0);
+        lv = alloc();
+        lp = { breaks: [] };
+        loops.push(lp);
+        sv = pushScope();
+        bindLocal(s.name, lv);
+        stmts(s.body);
+        popScope(sv);
+        loops.pop();
+        emit('FORSTEP', base, prep + 4, 0);
+        endSlot = here();
+        patch(prep, 'c', endSlot);
+        for (i2 = 0; i2 < lp.breaks.length; i2++) patch(lp.breaks[i2], 'a', endSlot);
+        break;
+      case 'return':
+        if (s.exprs.length === 0) { emit('RET0'); break; }
+        multi = isMulti(s.exprs[s.exprs.length - 1]);
+        base = top;
+        for (i2 = 0; i2 < s.exprs.length; i2++) {
+          if (multi && i2 === s.exprs.length - 1) {
+            pk = alloc();
+            packOf(s.exprs[i2], pk);
+            top = pk + 1;
+            break;
+          }
+          r1 = alloc();
+          cexpr(s.exprs[i2], r1);
+        }
+        emit(multi ? 'RETM' : 'RETN', base, s.exprs.length);
+        break;
+      case 'break':
+        if (!loops.length) vmFail('break outside loop');
+        loops[loops.length - 1].breaks.push(emit('JMP', 0));
+        break;
+      default:
+        vmFail('statement ' + s.k);
+    }
+    top = t0;
+  }
+
+  // parameters occupy registers 1..n; the interpreter fills them from its varargs
+  scopes.push({ m: {} });
+  for (i = 0; i < params.length; i++) bindLocal(params[i], i + 1);
+  top = params.length + 1;
+  stmts(body);
+  emit('RET0');
+  return { code: code, consts: consts };
+}
+
+// Interpreter source. Opcode numbers come from the per-build permutation.
+function vmInterp(ids, nm) {
+  var br = [
+    ['MOVE', 'R[a] = R[b]'],
+    ['LOADK', 'R[a] = K[b]'],
+    ['LOADNIL', 'R[a] = nil'],
+    ['GETG', 'R[a] = ' + nm.env + '[K[b]]'],
+    ['SETG', nm.env + '[K[b]] = R[a]'],
+    ['GETT', 'R[a] = R[b][R[c]]'],
+    ['SETT', 'R[a][R[b]] = R[c]'],
+    ['SELF', 'local o = R[b]; R[a + 1] = o; R[a] = o[K[c]]'],
+    ['TABLE', 'R[a] = {}'],
+    ['ADD', 'R[a] = R[b] + R[c]'],
+    ['SUB', 'R[a] = R[b] - R[c]'],
+    ['MUL', 'R[a] = R[b] * R[c]'],
+    ['DIV', 'R[a] = R[b] / R[c]'],
+    ['IDIV', 'R[a] = R[b] // R[c]'],
+    ['MOD', 'R[a] = R[b] % R[c]'],
+    ['POW', 'R[a] = R[b] ^ R[c]'],
+    ['CONCAT', 'R[a] = R[b] .. R[c]'],
+    ['EQ', 'R[a] = R[b] == R[c]'],
+    ['LT', 'R[a] = R[b] < R[c]'],
+    ['LE', 'R[a] = R[b] <= R[c]'],
+    ['UNM', 'R[a] = -R[b]'],
+    ['NOT', 'R[a] = not R[b]'],
+    ['LEN', 'R[a] = #R[b]'],
+    ['JMP', 'pc = a'],
+    ['JF', 'if not R[a] then pc = b end'],
+    ['JT', 'if R[a] then pc = b end'],
+    ['CALL', 'R[a] = (R[a](' + nm.u + '(R, a + 1, a + b)))'],
+    ['CALLP', 'R[a] = ' + nm.k + '(R[a](' + nm.u + '(R, a + 1, a + b)))'],
+    ['CALLM', 'local f, t, p = R[a], {}, R[a + b + 1]; for i = 1, b do t[i] = R[a + i] end; for i = 1, p.n do t[b + i] = p[i] end; R[a] = (f(' + nm.u + '(t, 1, b + p.n)))'],
+    ['CALLMP', 'local f, t, p = R[a], {}, R[a + b + 1]; for i = 1, b do t[i] = R[a + i] end; for i = 1, p.n do t[b + i] = p[i] end; R[a] = ' + nm.k + '(f(' + nm.u + '(t, 1, b + p.n)))'],
+    ['RETN', 'return ' + nm.u + '(R, a, a + b - 1)'],
+    ['SETALL', 'R[a] = {' + nm.u + '(R[b], 1, R[b].n)}'],
+    ['APPEND', 'local p, t = R[b], R[a]; for i = 1, p.n do t[c + i - 1] = p[i] end'],
+    ['CLOSURE', 'local F, D2 = c, ' + nm.d + '[b]; R[a] = function(...) local va; if F % 2 == 1 then va = ' + nm.v + '((F - 1) // 2, ...) end; return ' + nm.x + '(D2, va, ...) end'],
+    ['VARG', 'R[a] = va[1]'],
+    ['VARGP', 'R[a] = va'],
+    ['RETM', 'local p, t = R[a + b - 1], {}; for i = 1, b - 1 do t[i] = R[a + i - 1] end; for i = 1, p.n do t[b - 1 + i] = p[i] end; return ' + nm.u + '(t, 1, b - 1 + p.n)'],
+    ['RET0', 'return'],
+    ['FORPREP', "local i, l, s = R[a], R[a + 1], R[a + 2]; if s == 0 then error(\"'for' step is zero\") end; " +
+                'if (s > 0 and i <= l) or (s < 0 and i >= l) then R[a + 3] = i else pc = c end'],
+    ['FORSTEP', 'local i = R[a] + R[a + 2]; R[a] = i; local l, s = R[a + 1], R[a + 2]; ' +
+                'if (s > 0 and i <= l) or (s < 0 and i >= l) then R[a + 3] = i; pc = b end']
+  ];
+  var chain = br.map(function (x, k) {
+    return (k ? 'elseif' : 'if') + ' op == ' + ids[x[0]] + ' then ' + x[1];
+  }).join('\n');
+  return [
+    'local ' + nm.u + ' = table.unpack or unpack',
+    'local function ' + nm.x + '(D, va, ...)',
+    'local C, K = D[1], D[2]',
+    'if not D[4] then',
+    'local s = 0',
+    'for i = 1, #C do s = (s * 31 + C[i]) % 2147483647 end',
+    'if s ~= D[3] then error("integrity check failed") end',
+    'D[4] = true',
+    'end',
+    'local R = {...}',
+    'local pc, op, a, b, c = 1, 0, 0, 0, 0',
+    'while true do',
+    'op, a, b, c = C[pc], C[pc + 1], C[pc + 2], C[pc + 3]',
+    'pc = pc + 4',
+    chain,
+    'end',
+    'end',
+    'end'
+  ].join('\n');
+}
+
+// Tries to compile the function literal starting at T[i]. Returns null when the
+// body is outside the subset (any failure is a clean skip).
+function vmTryFunction(T, i, all, nm, reg) {
+  var h, e, body, c, toks, args, k;
+  h = fnHeader(T, i);
+  if (!h) return null;
+  try {
+    e = rawFunctionEnd(T, i);
+    body = T.slice(h.close + 1, e);
+    c = vmCompileBody(h.params, body, all, h.vararg, reg);
+  } catch (err) {
+    return { skip: err.message };
+  }
+  args = [nm.d + '[' + reg(c) + ']', h.vararg ? nm.k + '(...)' : 'nil'];
+  for (k = 0; k < h.params.length; k++) args.push(h.params[k]);
+  toks = tokenize('return ' + nm.x + '(' + args.join(', ') + ') end');
+  return { header: T.slice(i, h.close + 1), call: toks, end: e };
+}
+
+// Locates the parameter list of the function starting at T[i].
+function fnHeader(T, i) {
+  var k = i + 1, open = -1, close = -1, method = false, params = [], vararg = false, j;
+  for (; T[k]; k++) {
+    if (isSym(T[k], '(')) { open = k; break; }
+    if (isSym(T[k], ':')) method = true;
+  }
+  if (open < 0) return null;
+  for (j = open + 1; T[j]; j++) {
+    if (isSym(T[j], ')')) { close = j; break; }
+    if (T[j][0] === 'ID') params.push(T[j][1]);
+    else if (isSym(T[j], '...')) vararg = true;
+  }
+  if (close < 0) return null;
+  if (method) params.unshift('self');
+  return { open: open, close: close, params: params, vararg: vararg };
+}
+
+// Checksum of the mapped bytecode; the interpreter recomputes it on first use.
+function vmChecksum(code, ids) {
+  var s = 0, i, v;
+  for (i = 0; i < code.length; i++) {
+    v = (i % 4 === 0) ? ids[code[i]] : code[i];
+    s = (s * 31 + v) % 2147483647;
+  }
+  return s;
+}
+
+// Applies the VM layer to a token stream. Returns the rewritten stream.
+function vmPass(T, rnd, idents) {
+  var skips = [], all = {}, i, j, t, out = [], fns = [], r, ids = {}, perm = [], q, s2, tmp, nm, pre, n, k, vmNames = {}, used;
+
+  function freshName(prefix) {
+    var nmx, chars = 'abcdefghijklmnopqrstuvwxyz', guard = 0;
+    do {
+      nmx = prefix;
+      for (var z = 0; z < 6; z++) nmx += chars.charAt(rnd(chars.length));
+      guard++;
+    } while (has(idents, nmx) && guard < 100);
+    idents[nmx] = 1;
+    return nmx;
+  }
+
+  // every name declared as a local anywhere in the chunk
+  for (i = 0; i < T.length; i++) {
+    t = T[i];
+    if (isKw(t, 'local')) {
+      j = i + 1;
+      if (isKw(T[j], 'function')) {
+        if (T[j + 1] && T[j + 1][0] === 'ID') all[T[j + 1][1]] = 1;
+        continue;
+      }
+      while (T[j] && T[j][0] === 'ID') {
+        all[T[j][1]] = 1;
+        j++;
+        if (isSym(T[j], ',')) j++; else break;
+      }
+    } else if (isKw(t, 'for')) {
+      for (j = i + 1; T[j] && !isSym(T[j], '=') && !isKw(T[j], 'in'); j++) {
+        if (T[j][0] === 'ID') all[T[j][1]] = 1;
+      }
+    } else if (isKw(t, 'function')) {
+      r = fnHeader(T, i);
+      if (r) for (j = 0; j < r.params.length; j++) all[r.params[j]] = 1;
+    }
+  }
+
+  nm = { d: freshName('Vd'), env: freshName('Ve'), x: freshName('Vx'), u: freshName('Vu'), k: freshName('Vk'), v: freshName('Vv') };
+
+  for (i = 0; i < T.length; ) {
+    t = T[i];
+    if (isKw(t, 'function')) {
+      r = vmTryFunction(T, i, all, nm, function (c) { fns.push(c); return fns.length; });
+      if (r && r.skip) skips.push(r.skip);
+      if (r && !r.skip) {
+        for (k = 0; k < r.header.length; k++) out.push(r.header[k]);
+        for (k = 0; k < r.call.length; k++) out.push(r.call[k]);
+        i = r.end + 1;
+        continue;
+      }
+    }
+    out.push(t);
+    i++;
+  }
+
+  if (!fns.length) return { toks: T, compiled: 0, skips: skips };
+
+  // per-build opcode permutation
+  for (q = 0; q < VM_OPS.length; q++) perm.push(q + 1);
+  for (q = perm.length - 1; q > 0; q--) {
+    s2 = rnd(q + 1);
+    tmp = perm[q]; perm[q] = perm[s2]; perm[s2] = tmp;
+  }
+  for (q = 0; q < VM_OPS.length; q++) ids[VM_OPS[q]] = perm[q];
+
+  // data table: VMD[n] = { {bytecode...}, {constant tokens...} }
+  pre = tokenize('local ' + nm.d + ' = {');
+  for (n = 0; n < fns.length; n++) {
+    var cd = fns[n], cc, cl;
+    pre.push(['SYM', '{'], ['SYM', '{']);
+    for (cc = 0; cc < cd.code.length; cc += 4) {
+      pre.push(['NUM', String(ids[cd.code[cc]])], ['SYM', ',']);
+      pre.push(['NUM', String(cd.code[cc + 1])], ['SYM', ',']);
+      pre.push(['NUM', String(cd.code[cc + 2])], ['SYM', ',']);
+      pre.push(['NUM', String(cd.code[cc + 3])], ['SYM', ',']);
+    }
+    pre.push(['SYM', '}'], ['SYM', ',']);
+    pre.push(['SYM', '{']);
+    for (cl = 0; cl < cd.consts.length; cl++) pre.push(cd.consts[cl], ['SYM', ',']);
+    pre.push(['SYM', '}'], ['SYM', ','], ['NUM', String(vmChecksum(cd.code, ids))], ['SYM', ','], ['SYM', '}'], ['SYM', ',']);
+  }
+  pre.push(['SYM', '}']);
+  pre = pre.concat(tokenize('local ' + nm.env + ' = (getgenv and getgenv()) or _G'));
+  pre = pre.concat(tokenize('local ' + nm.k + ' = function(...) return {n = select("#", ...), ...} end'));
+  pre = pre.concat(tokenize('local ' + nm.v + ' = function(np, ...) return {n = math.max(select("#", ...) - np, 0), select(np + 1, ...)} end'));
+  pre = pre.concat(tokenize(vmInterp(ids, nm)));
+  return { toks: pre.concat(out), compiled: fns.length, skips: skips };
+}
+
+// ---------- main ----------
 function obfuscate(src, seed, opts) {
   opts = opts || {};
-  var profile = (opts.profile || 'medium').toLowerCase();
-  if (profile !== 'light' && profile !== 'medium' && profile !== 'heavy') profile = 'medium';
+  var profile = String(opts.profile || 'medium').toLowerCase();
+  if (profile !== 'light' && profile !== 'medium' && profile !== 'heavy' && profile !== 'maximum') profile = 'medium';
   var density = +opts.density;
   if (!(density >= 0 && density <= 1)) {
-    density = profile === 'light' ? 0.35 : profile === 'heavy' ? 0.9 : 0.6;
+    density = profile === 'light' ? 0.35 : profile === 'heavy' ? 0.9 : profile === 'maximum' ? 1 : 0.6;
   }
-  var doRename     = opts.rename     !== false;
-  var doStrings    = opts.strings    !== false;
-  var doNumbers    = opts.numbers    !== false;
-  var doAnti       = opts.antitamper !== false;
-  var doJunk       = opts.junk       !== false;
-  var doOpaque     = opts.opaque     !== false && profile !== 'light';
-  var doMba        = opts.mba        !== false && profile !== 'light';
-  var doCff        = opts.cff        !== false && profile !== 'light';
-  var doHideEnv    = opts.hideEnv    !== false;
-  var doSoftAnti   = opts.softAnti   !== false;
-  // delayStrings is OPT-IN only — nested thunks break on some executors (Delta)
-  var doDelayStr   = opts.delayStrings === true;
-  var doVm         = opts.vm === true;
-  if (opts.antiDebug === false) doAnti = false;
-  if (opts.antiDebug === true)  doAnti = true;
-  if (opts.cff === false) doCff = false;
-  if (opts.cff === true)  doCff = true;
+
+  var doRename   = opts.rename !== false;
+  var doStrings  = opts.strings !== false;
+  var doNumbers  = opts.numbers !== false;
+  var doAnti     = opts.antitamper !== false && opts.antiDebug !== false;
+  var doJunk     = opts.junk !== false;
+  var doOpaque   = opts.opaque !== false;
+  var doMba      = opts.mba !== false;
+  var doCff      = opts.cff !== false;
+
+  var doHideEnv  = opts.hideEnv !== false;
+  var doDelayStr = opts.delayStrings === true;
+  var doVm       = opts.vm === true || (profile === 'maximum' && opts.vm !== false);  // maximum turns the VM layer on   // opt-in: nested thunks break on some executors
   if (profile === 'light') {
-    if (opts.junk   !== true) doJunk   = false;
+    if (opts.junk !== true)   doJunk = false;
     if (opts.opaque !== true) doOpaque = false;
-    if (opts.mba    !== true) doMba    = false;
-    if (opts.cff    !== true) doCff    = false;
-  }
-  if (profile === 'heavy') {
-    doJunk = opts.junk !== false;
-    doOpaque = opts.opaque !== false;
-    doMba = opts.mba !== false;
-    if (opts.cff !== false) doCff = true;
+    if (opts.mba !== true)    doMba = false;
+    if (opts.cff !== true)    doCff = false;
   }
 
-  // -------- binding / bootstrap --------
-  var bindPlace = Math.floor(+opts.place || 0);
-  var bindUser  = Math.floor(+opts.user  || 0);
-  if (!(bindPlace > 0)) bindPlace = 0;
-  if (!(bindUser  > 0)) bindUser  = 0;
-  var bound = (bindPlace > 0 || bindUser > 0);
-  var RP = bound ? (bindPlace % 251) : 0;
-  var RU = (bound && bindUser > 0) ? (bindUser % 251) : -1;
-  var SALT = bound ? ((bindPlace % 251) + (bindUser > 0 ? ((bindUser * 13) % 251) : 0)) % 256 : 0;
-  var REQPATH = (typeof opts.require === 'string') ? opts.require : '';
-  if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(REQPATH)) REQPATH = '';
-  var BOOTRAW = (typeof opts.bootstrap === 'string') ? opts.bootstrap : '';
-  var BOOT = BOOTRAW;
-  if (BOOT !== '' && !/^[0-9a-fA-F]{32,128}$/.test(BOOT)) {
-    throw new Error('obf: bootstrap must be 32-128 hex characters (use Generate)');
-  }
-  var VBASE = (typeof opts.vault === 'string') ? opts.vault : '';
-  if (!/^https?:\/\/[A-Za-z0-9_.-]+(:\d+)?(\/[A-Za-z0-9_.\-/]*)?$/.test(VBASE)) VBASE = '';
-  if (BOOT !== '' && VBASE === '') BOOT = '';
-  if (BOOT !== '' && !bound) BOOT = '';
-  var SCRIPTID = (typeof opts.script === 'string') ? opts.script : '';
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(SCRIPTID)) SCRIPTID = '';
-  function fnv64hexBytes(bytes) {
-    var hi = 0xCBF29CE4, lo = 0x84222325, i, b;
-    var a0, a1, a2, a3, r0, r1, r2, r3, t0, t1, t2, t3, o0, o1, o2, o3;
-    for (i = 0; i < bytes.length; i++) {
-      b = bytes[i];
-      lo = (lo ^ b) >>> 0;
-      a0 = lo & 0xFFFF; a1 = (lo >>> 16) & 0xFFFF;
-      a2 = hi & 0xFFFF; a3 = (hi >>> 16) & 0xFFFF;
-      r0 = a0 * 435; r1 = a1 * 435;
-      r2 = a0 * 256 + a2 * 435; r3 = a1 * 256 + a3 * 435;
-      t0 = r0; o0 = t0 % 65536;
-      t1 = r1 + Math.floor(t0 / 65536); o1 = t1 % 65536;
-      t2 = r2 + Math.floor(t1 / 65536); o2 = t2 % 65536;
-      t3 = r3 + Math.floor(t2 / 65536); o3 = t3 % 65536;
-      hi = o3 * 65536 + o2; lo = o1 * 65536 + o0;
-    }
-    function h8(v) { var s = v.toString(16); while (s.length < 8) s = '0' + s; return s; }
-    return h8(hi) + h8(lo);
-  }
-  var BKEY = BOOT;
-  if (BOOT !== '' && SCRIPTID !== '') BKEY = fnv64hexBytes(utf8bytes(BOOT + '|' + SCRIPTID));
-  var STRIDX = 0, POOL = [], POOLPFX = '';
+  // ---------- binding ----------
+  var bindPlace = Math.floor(+opts.place) || 0;
+  var bindUser  = Math.floor(+opts.user) || 0;
+  if (bindPlace < 0) bindPlace = 0;
+  if (bindUser < 0) bindUser = 0;
+  var bound = bindPlace > 0 || bindUser > 0;
+  var RP = bindPlace % 251;
+  var RU = bindUser > 0 ? bindUser % 251 : -1;
+  var SALT = bound ? ((RP + (bindUser > 0 ? (bindUser * 13) % 251 : 0)) % 256) : 0;
 
-  // -------- PRNG --------
+  // ---------- PRNG ----------
   var rngState = (seed >>> 0) || 1;
   function rnd(n) {
     rngState = (rngState * 1664525 + 1013904223) % 4294967296;
     var r = rngState / 4294967296;
-    if (n === undefined) return r;
-    return Math.floor(r * n);
+    return n === undefined ? r : Math.floor(r * n);
   }
-  function contains(arr, v) { var i; for (i = 0; i < arr.length; i++) if (arr[i] === v) return true; return false; }
+  var KCHAIN = [], ci;
+  for (ci = 0; ci < 64; ci++) KCHAIN.push(1 + rnd(255));
 
-  // -------- keywords / operators --------
-  var KEYWORDS = {'and':1,'break':1,'do':1,'else':1,'elseif':1,'end':1,
-    'false':1,'for':1,'function':1,'goto':1,'if':1,'in':1,'local':1,'nil':1,
-    'not':1,'or':1,'repeat':1,'return':1,'then':1,'true':1,'until':1,
-    'while':1,'continue':1};
-  var COMPLETE_K = {'ID':1,'NUM':1,'STR':1,'LSTR':1};
-  var COMPLETE_V = {'true':1,'false':1,'nil':1,'...':1,')':1,']':1,'}':1,'break':1};
-  var BLOCK_KW = {'local':1,'function':1,'if':1,'while':1,'for':1,'repeat':1,
-    'do':1,'end':1,'else':1,'elseif':1,'until':1,'return':1,'break':1,'then':1,'in':1};
-  var NEVER = {'self':1,'_G':1,'_VERSION':1};
-
-  var ENV_NAMES = {
-    'request':1,'writefile':1,'readfile':1,'isfile':1,'loadfile':1,
-    'loadstring':1,'getgenv':1,'http_request':1,'syn':1,'game':1,
-    'wait':1,'task':1,'require':1,'print':1,'warn':1,'error':1,
-    'pcall':1,'xpcall':1,'select':1,'type':1,'typeof':1,'tostring':1,
-    'tonumber':1,'tick':1,'time':1,'os':1,'math':1,'string':1,'table':1,
-    'coroutine':1,'bit32':1,'debug':1,'_ENV':1,'getfenv':1,'setfenv':1
-  };
-
-  function isAlpha(c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_'; }
-  function isDigit(c) { return c >= '0' && c <= '9'; }
-  function isAlnum(c) { return isAlpha(c) || isDigit(c); }
-
-  // -------- Tokenizer --------
-  function tokenize(s) {
-    var toks = [], i = 0, n = s.length, c, j, m, lv, q, raw, d, w, k, eq;
-    function longOpen(p) {
-      if (s.charAt(p) !== '[') return null;
-      k = p + 1; eq = '';
-      while (s.charAt(k) === '=') { eq += '='; k++; }
-      if (s.charAt(k) !== '[') return null;
-      return {eq:eq, end:k + 1};
-    }
-    while (i < n) {
-      c = s.charAt(i);
-      var cc0 = s.charCodeAt(i);
-      if (cc0 === 32 || cc0 === 9 || cc0 === 13 || cc0 === 10 || cc0 === 11 || cc0 === 12) { i++; continue; }
-      if (c === '-' && s.charAt(i + 1) === '-') {
-        if (s.charAt(i + 2) === '[') {
-          var mo = longOpen(i + 2);
-          if (mo) {
-            j = s.indexOf(']' + mo.eq + ']', mo.end);
-            if (j < 0) throw new Error('lex: unterminated long comment');
-            i = j + mo.eq.length + 2; continue;
-          }
-        }
-        j = s.indexOf('\n', i);
-        i = (j < 0) ? n : j;
-        continue;
-      }
-      var lo = longOpen(i);
-      if (lo) {
-        j = s.indexOf(']' + lo.eq + ']', lo.end);
-        if (j < 0) throw new Error('lex: unterminated long string');
-        toks.push(['LSTR', s.substring(i, j + lo.eq.length + 2), lo.eq]);
-        i = j + lo.eq.length + 2;
-        continue;
-      }
-      if (c === '"' || c === "'") {
-        q = c; j = i + 1; raw = '';
-        for (;;) {
-          if (j >= n) throw new Error('lex: unterminated string');
-          d = s.charAt(j);
-          if (d === '\\') { raw += d + s.charAt(j + 1); j += 2; continue; }
-          if (d === q) break;
-          if (d === '\n') throw new Error('lex: newline in string');
-          raw += d; j++;
-        }
-        toks.push(['STR', s.substring(i, j + 1), q, raw]);
-        i = j + 1;
-        continue;
-      }
-      if (isDigit(c) || (c === '.' && isDigit(s.charAt(i + 1)))) {
-        var rest = s.substring(i);
-        m = rest.match(/^0[xX][0-9a-fA-F_]+/);
-        if (m) { toks.push(['NUM', m[0]]); i += m[0].length; continue; }
-        m = rest.match(/^0[bB][01_]+/);
-        if (m) { toks.push(['NUM', m[0]]); i += m[0].length; continue; }
-        m = rest.match(/^[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?/);
-        if (m && !(c === '.' && m[0].charAt(0) !== '.')) {
-          toks.push(['NUM', m[0]]); i += m[0].length; continue;
-        }
-        if (c !== '.') throw new Error('lex: bad number');
-      }
-      if (isAlpha(c)) {
-        j = i; while (j < n && isAlnum(s.charAt(j))) j++;
-        w = s.substring(i, j);
-        toks.push([KEYWORDS[w] ? 'KW' : 'ID', w]);
-        i = j; continue;
-      }
-      var sym = null;
-      var three = s.substring(i, i + 3), two = s.substring(i, i + 2);
-      if (three === '...') sym = '...';
-      else if (two === '..' || two === '==' || two === '~=' || two === '<=' || two === '>=') sym = two;
-      else if (two === '::') throw new Error('lex: labels unsupported');
-      if (sym) { toks.push(['SYM', sym]); i += sym.length; continue; }
-      if ('(){}[];:,+-*/%^#<>=.'.indexOf(c) >= 0) { toks.push(['SYM', c]); i++; continue; }
-      if (s.charCodeAt(i) > 127) throw new Error('lex: non-ascii outside string');
-      throw new Error('lex: bad char ' + c);
-    }
-    return toks;
+  // ---------- prefix / internal names ----------
+  var idents = {}, idre = /[A-Za-z_][A-Za-z0-9_]*/g, mm, kk, guard, hasPre;
+  while ((mm = idre.exec(src)) !== null) idents[mm[0]] = 1;
+  function pickPrefix(len) {
+    var s = '_', i;
+    for (i = 0; i < len; i++) s += ALPHA_L.charAt(rnd(26));
+    return s;
   }
-
-  // -------- String decoding --------
-  var SIMPLE_ESC = {'a':7,'b':8,'f':12,'n':10,'r':13,'t':9,'v':11,'\\':92,
-    '"':34,"'":39,'\n':10};
-  function decodeShort(raw) {
-    var out = [], i = 0, n = raw.length, e, mm;
-    while (i < n) {
-      var c = raw.charAt(i);
-      if (c !== '\\') {
-        var cc = raw.charCodeAt(i);
-        if (cc < 128) out.push(cc);
-        else if (cc < 2048) out.push(192 | (cc >> 6), 128 | (cc & 63));
-        else out.push(224 | (cc >> 12), 128 | ((cc >> 6) & 63), 128 | (cc & 63));
-        i++; continue;
-      }
-      if (i + 1 >= n) return null;
-      e = raw.charAt(i + 1);
-      if (SIMPLE_ESC[e] !== undefined) { out.push(SIMPLE_ESC[e]); i += 2; }
-      else if (e === 'x' || e === 'u' || e === 'z') return null;
-      else if (e >= '0' && e <= '9') {
-        mm = raw.substring(i + 1).match(/^[0-9]{1,3}/);
-        out.push(parseInt(mm[0], 10) % 256);
-        i += 1 + mm[0].length;
-      } else return null;
+  var PREFIX = pickPrefix(3);
+  for (guard = 0; guard < 40; guard++) {
+    hasPre = false;
+    for (kk in idents) {
+      if (has(idents, kk) && kk.substring(0, PREFIX.length) === PREFIX) { hasPre = true; break; }
     }
-    return out;
+    if (!hasPre) break;
+    PREFIX = pickPrefix(3 + (guard >> 3));
   }
-  function utf8bytes(str) {
-    var data = [], i, cc;
-    for (i = 0; i < str.length; i++) {
-      cc = str.charCodeAt(i);
-      if (cc < 128) data.push(cc);
-      else if (cc < 2048) data.push(192 | (cc >> 6), 128 | (cc & 63));
-      else data.push(224 | (cc >> 12), 128 | ((cc >> 6) & 63), 128 | (cc & 63));
-    }
-    return data;
+  // Renamed locals are PREFIX + lowercase base36. Every other internal name uses
+  // PREFIX + an uppercase tag, so the two families can never collide.
+  var UCTR = 0;
+  function inm(tag) {
+    return PREFIX + tag + ALPHA_U.charAt(rnd(26)) + ALPHA_U.charAt(rnd(26)) + (UCTR++).toString(36).toUpperCase();
   }
+  // Per-build names for locals inside the runtime templates (decoders, helpers).
+  var LNMAP = {};
+  function ln(n) { if (!has(LNMAP, n)) LNMAP[n] = inm('L'); return LNMAP[n]; }
+  function tpl(str) { return str.replace(/@(\w+)@/g, function (m, n) { return ln(n); }); }
+  var KN     = PREFIX + 'K';       // runtime key (anti-tamper adjusted)
+  var ENVFN  = inm('F');           // env resolver
+  var CHN    = inm('C');           // packed KCHAIN string
+  var BXN    = inm('X');           // xor helper
+  var KYN    = inm('Y');           // key derivation helper
+  var POOLPFX = PREFIX + 'Q';      // placeholder prefix (digits follow)
 
-  // -------- Emitter state --------
-  var T = null, POS = 0, OUT = [], SCOPES = null, BRACE = 0,
-      COUNTER = 0, PREV = '', PREFIX = '', DEC = '';
-  var stats = null;
-  var BASE = 0, BASEST = [];
+  // ---------- emitter state ----------
+  var T = null, POS = 0, OUT = [], SCOPES = [{}], BRACE = 0, COUNTER = 0, PREV = '';
+  var BASE = 0, BASEST = [], POOL = [], STRIDX = 0, envUsed = {}, envOrder = [];
+  var stats = { decls: 0, renamed: 0, str_enc: 0, str_plain: 0, num_mangled: 0,
+    env_enc: 0, junk: 0, decoys: 0, opaque: 0, cff_fns: 0 };
+  var pool = null;
+  var curKey = 1;   // per-function arithmetic key, reset at each function body
 
   function emit(s) { OUT.push(s); PREV = s; }
-  function peek() { if (POS < T.length) return T[POS]; return [null, null]; }
-  function look(off) {
-    var p = POS + ((off === undefined) ? 1 : off);
-    if (p < T.length) return T[p];
-    return [null, null];
-  }
+  function peek() { return POS < T.length ? T[POS] : [null, null]; }
   function nxt() { return T[POS++]; }
   function ctx() {
     var s = '@' + (BASE + POS) + ':', i;
@@ -271,396 +1217,178 @@ function obfuscate(src, seed, opts) {
     return s;
   }
   function fail(m) { throw new Error('parse: ' + m + ctx()); }
+  function track(t) { if (t === '{') BRACE++; else if (t === '}') BRACE--; }
   function expect(v) {
     var tk = nxt();
     if (tk[1] !== v) fail('expected ' + v + ' got ' + tk[1]);
     emit(tk[1]); track(tk[1]);
   }
-  function track(t) { if (t === '{') BRACE++; else if (t === '}') BRACE--; }
   function push() { SCOPES.push({}); }
   function pop() { SCOPES.pop(); }
-  function declare(name) {
-    if (NEVER[name]) return name;
-    var nn = PREFIX + (COUNTER++).toString(36);
+
+  function newName(name) {
+    if (!doRename || has(NEVER, name)) return name;
+    return PREFIX + (COUNTER++).toString(36);
+  }
+  function bind(name, nn) {
+    if (has(NEVER, name)) return;
     SCOPES[SCOPES.length - 1][name] = nn;
     stats.decls++;
-    return nn;
   }
+  // With rename off, newName() returns the name unchanged, so a declared local
+  // still resolves to itself and is never mistaken for an env global.
   function resolve(name) {
-    if (NEVER[name]) return null;
-    var i, sc;
-    for (i = SCOPES.length - 1; i >= 0; i--) {
-      sc = SCOPES[i];
-      if (Object.prototype.hasOwnProperty.call(sc, name)) return sc[name];
+    if (has(NEVER, name)) return null;
+    for (var i = SCOPES.length - 1; i >= 0; i--) {
+      if (has(SCOPES[i], name)) return SCOPES[i][name];
     }
     return null;
   }
 
-  // -------- cryptBytes + KCHAIN --------
-  // k is NOT stored in the source. Per-slot keys are chained: the first
-  // slot's k is derived from KCHAIN and K, subsequent slots step the chain.
-  // Both k and q appear in emitted source as <the slot index> only — the
-  // decryptor reconstructs k and q at runtime from K (anti-tamper adjusted).
-  var KCHAIN = null;
-  function initKChain() {
-    KCHAIN = [];
-    for (var i = 0; i < 64; i++) KCHAIN.push(1 + rnd(255));
-  }
-  initKChain();
-
+  // ---------- string encryption ----------
+  // Per-slot key from KCHAIN + SALT. Decryptors mirror this exactly. Each string
+  // gets one of two encodings at random: an XOR/nibble-swap chain (mode 0) or a
+  // per-byte additive chain (mode 1). Each mode has its own decoder in the output.
   function cryptBytes(data) {
-    var q = STRIDX;
-    var slotChain = (q * 17 + SALT * 5 + 131) % KCHAIN.length;
-    var k = (KCHAIN[slotChain] + q) % 256;
+    var q = STRIDX++;
+    var mode = rnd(2);
+    var k = (KCHAIN[(q * 17 + SALT * 5 + 131) % KCHAIN.length] + q) % 256;
     if (k === 0) k = 1;
-    var hx = '';
-    var i, b, roll, roll2, k2, ok;
-    STRIDX++;
-    k2 = ((k * 37 + q * 91 + SALT * 13) & 255) || 1;
-    roll = (k * 131 + SALT * 17 + q * 29) & 255;
-    roll2 = (k2 * 53 + q * 17) & 255;
+    var hx = '', i, b, ok, ks;
+    if (mode === 1) {
+      for (i = 0; i < data.length; i++) {
+        ks = (k * 11 + q * 3 + i * 7 + SALT) % 256;
+        b = (data[i] + ks) & 255;
+        hx += (b < 16 ? '0' : '') + b.toString(16);
+      }
+      return { hex: hx, slot: q, mode: 1 };
+    }
+    var k2 = ((k * 37 + q * 91 + SALT * 13) & 255) || 1;
+    var r1 = (k * 131 + SALT * 17 + q * 29) & 255;
+    var r2 = (k2 * 53 + q * 17) & 255;
     for (i = 0; i < data.length; i++) {
-      // --- layer 1: chained stream (inner) ---
-      roll = (roll * 73 + i * 11 + k) & 255;
-      roll2 = (roll2 * 47 + i * 19 + k2) & 255;
-      b = (data[i] + k + SALT + (q * 7) + (i * 3)) & 255;
-      b = b ^ roll;
-      b = (b + roll2) & 255;
-      // --- layer 2: outer XOR + nibble-swap (keyed by slot+index) ---
+      r1 = (r1 * 73 + i * 11 + k) & 255;
+      r2 = (r2 * 47 + i * 19 + k2) & 255;
+      b = (data[i] + k + SALT + q * 7 + i * 3) & 255;
+      b = b ^ r1;
+      b = (b + r2) & 255;
       ok = ((q * 31 + 17 + i * 13) & 255) || 1;
       b = b ^ ok;
       b = ((b & 15) << 4) | (b >> 4);
       hx += (b < 16 ? '0' : '') + b.toString(16);
     }
-    // record the ciphertext + slot index; the runtime reconstructs k/q
-    return { hex: hx, slot: q };
+    return { hex: hx, slot: q, mode: 0 };
   }
 
-  // -------- string emission --------
+  function envLocal(name) {
+    if (!has(envUsed, name)) {
+      POOL.push(cryptBytes(utf8bytes(name)));
+      envUsed[name] = { nm: inm('E'), pidx: POOL.length - 1 };
+      envOrder.push(name);
+    }
+    return envUsed[name].nm;
+  }
+
   function emitStrTok(tok) {
-    var data;
+    var data, nx = peek(), ph, lv, inner;
     if (tok[0] === 'LSTR') {
-      var lv = tok[2];
-      var inner = tok[1].substring(2 + lv.length, tok[1].length - 2 - lv.length);
+      lv = tok[2];
+      inner = tok[1].substring(2 + lv.length, tok[1].length - 2 - lv.length);
+      if (inner.charAt(0) === '\n') inner = inner.substring(1);
+      else if (inner.charAt(0) === '\r') inner = inner.substring(inner.charAt(1) === '\n' ? 2 : 1);
       data = utf8bytes(inner);
     } else {
       data = decodeShort(tok[3]);
-      if (data === null) { emit(tok[1]); stats.str_plain++; return; }
     }
-    var la = look(0);
-    if (la[1] === '=' && BRACE > 0) { emit(tok[1]); stats.str_plain++; return; }
-    if (!doStrings) { emit(tok[1]); stats.str_plain++; return; }
-    var ck = cryptBytes(data);
-    POOL.push(ck);
-    var ph = POOLPFX + (POOL.length - 1);
-    if (PREV === '[' && la[1] === ']') emit('[' + ph + ']');
-    // Avoid double-parens: _E(x)((y)) can fail on some executors; emit bare call
+    if (!doStrings || data === null) { emit(tok[1]); stats.str_plain++; return; }
+    POOL.push(cryptBytes(data));
+    ph = POOLPFX + (POOL.length - 1);
+    stats.str_enc++;
+    if (PREV === '[' && nx[1] === ']') emit(ph);
     else if (PREV === '(' || PREV === ',') emit(ph);
     else emit('(' + ph + ')');
-    stats.str_enc++;
   }
 
-  // -------- numbers (fixed) --------
+  // ---------- numbers ----------
+  function mangleInt(v) {
+    var m = rnd(doMba ? 6 : 3), a, t2;
+    if (m === 0) return '0x' + v.toString(16);
+    if (m === 1 || v < 4) { a = rnd(v + 1); return '(' + a + '+' + (v - a) + ')'; }
+    if (m === 2) { t2 = Math.floor(v / 65536); a = v - t2 * 65536; return '(' + t2 + '*65536+' + a + ')'; }
+    if (m === 3) { t2 = rnd(v + 1); return '((' + (v - t2) + ')+' + t2 + ')'; }
+    if (m === 4) return '((' + (v * 2) + ')-(' + v + '))';
+    // Per-function key. Exact only while the sum stays below 2^53, since Luau
+    // numbers are doubles.
+    if (v + curKey < 9007199254740992) return '((' + (v + curKey) + ')-' + curKey + ')';
+    return '((' + (v * 2) + ')-(' + v + '))';
+  }
+
   function emitNum(text) {
     if (!doNumbers) { emit(text); return; }
-    var t = text.replace(/_/g, '');
-    var mhex = t.match(/^0[xX]([0-9a-fA-F]+)$/);
-    if (mhex) {
-      var hv = parseInt(mhex[1], 16);
-      if (hv >= 0 && hv <= 0xFFFFFFFF) {
-        var kk = rnd(5);
-        if (kk === 0) emit('(0x' + hv.toString(16) + ')');
-        else if (kk === 1) emit('(' + hv + ')');
-        else if (kk === 2 && hv > 3) { var hi = Math.floor(hv / 65536), lo = hv - hi * 65536; emit('(' + hi + '*65536+' + lo + ')'); }
-        else if (kk === 3) { var a = rnd(hv + 1); emit('(' + a + '+' + (hv - a) + ')'); }
-        else emit('(0x' + hv.toString(16) + ')');
-        stats.num_mangled++;
-        return;
-      }
-      emit(text); return;
-    }
-    var mbin = t.match(/^0[bB]([01]+)$/);
-    if (mbin) {
-      var bv = parseInt(mbin[1], 2);
-      if (bv >= 0 && bv <= 0xFFFFFFFF) {
-        var kkb = rnd(3);
-        if (kkb === 0) emit('(' + bv + ')');
-        else if (kkb === 1 && bv > 3) { var hib = Math.floor(bv / 65536), lob = bv - hib * 65536; emit('(' + hib + '*65536+' + lob + ')'); }
-        else emit('(' + bv + ')');
-        stats.num_mangled++;
-        return;
-      }
-      emit(text); return;
-    }
-    if (/^[0-9]+$/.test(t)) {
-      var v = parseInt(t, 10);
-      if (v >= 0 && v <= 0x1FFFFFFFFFFFFF) {
-        var mode = rnd(doMba ? 6 : 4);
-        if (mode === 0) emit('0x' + v.toString(16));
-        else if (mode === 1) { var a = rnd(v + 1); emit('(' + a + '+' + (v - a) + ')'); }
-        else if (mode === 2 && v > 3) { var hi3 = Math.floor(v / 65536), lo3 = v - hi3 * 65536; emit('(' + hi3 + '*65536+' + lo3 + ')'); }
-        else if (mode === 3 && v > 0) { var t2 = rnd(v + 1); emit('((' + (v - t2) + ')+' + t2 + ')'); }
-        else if (doMba && mode === 4 && v > 3) emit('((' + (v * 2) + ')-(' + v + '))');
-        else { var a2 = rnd(v + 1); emit('(' + a2 + '+' + (v - a2) + ')'); }
-        stats.num_mangled++;
-        return;
-      }
-      emit('tonumber("' + t + '")');
-      stats.num_mangled++;
+    var t = text.replace(/_/g, ''), m, v, fv;
+    m = /^0[xX]([0-9a-fA-F]+)$/.exec(t);
+    if (m) {
+      v = parseInt(m[1], 16);
+      if (v <= 0xFFFFFFFF) { emit(mangleInt(v)); stats.num_mangled++; } else emit(text);
       return;
     }
-    if (/^[0-9][0-9_]*(\.[0-9_]*)?([eE][+-]?[0-9]+)?$/.test(t)) {
-      var fv = parseFloat(t);
-      if (fv === fv) {
-        var delta = (1 + rnd(7)) * (rnd(2) ? 0.001 : 0.01);
-        var kd = rnd(4);
-        if (kd === 0) emit('(' + (fv + delta) + '-' + delta + ')');
-        else if (kd === 1) emit('(' + fv + ' * 2 - ' + fv + ')');
-        else if (kd === 2) emit('(' + (fv * 1000) + ' * 0.001)');
-        else emit(t);
-        if (kd !== 3) { stats.num_mangled++; return; }
-      }
+    m = /^0[bB]([01]+)$/.exec(t);
+    if (m) {
+      v = parseInt(m[1], 2);
+      if (v <= 0xFFFFFFFF) { emit(mangleInt(v)); stats.num_mangled++; } else emit(text);
+      return;
+    }
+    if (/^[0-9]+$/.test(t)) {
+      v = parseInt(t, 10);
+      if (v <= 9007199254740991) { emit(mangleInt(v)); stats.num_mangled++; } else emit(text);
+      return;
+    }
+    // Floats: x*2-x is exact in doubles (scaling by 2 is lossless). Nothing else is.
+    fv = parseFloat(t);
+    // Only when the printed form keeps '.' or 'e', so Lua still reads it as a float.
+    if (isFinite(fv) && fv < 1e300 && /[.eE]/.test(String(fv)) && rnd(2) === 0) {
+      emit('(' + fv + '*2-' + fv + ')');
+      stats.num_mangled++;
+      return;
     }
     emit(text);
   }
 
-  // -------- opaque predicates (non-foldable) --------
+  // ---------- opaque predicates (always true) ----------
   function opaqueTrue() {
     var k = rnd(6);
-    if (k === 0) return "((#'\\x1f\\x20\\x1e')==3)";
-    if (k === 1) return "((#'\\x01\\x02\\x03\\x04')==4)";
-    if (k === 2) return "((1+2)*3==9)";
-    if (k === 3) return "(({1,2,3})[3]==3)";
-    if (k === 4) return "((tostring(0)=='0'))";
-    return '((#\"\\x00\\x01\\x02\")==3)';
-  }
-  function opaqueFalse() {
-    var k = rnd(4);
-    if (k === 0) return "((#'\\x00\\x00\\x00\\x00')==3)";
-    if (k === 1) return "(({1,2})[1]==2)";
-    if (k === 2) return '((1+2)*3==8)';
-    return '(1==0)';
+    if (k === 0) return "((#'\\31\\32\\33')==3)";
+    if (k === 1) return "((#'\\1\\2\\3\\4')==4)";
+    if (k === 2) return '((1+2)*3==9)';
+    if (k === 3) return '(({1,2,3})[3]==3)';
+    if (k === 4) return "(tostring(0)=='0')";
+    return '((#"\\0\\1\\2")==3)';
   }
 
-  // -------- identifier emission (with hideEnv) --------
+  // ---------- identifiers ----------
+  function emitRef(name) {
+    var nn = resolve(name);
+    if (nn) { emit(nn); stats.renamed++; } else emit(name);
+  }
+
   function emitId(name) {
-    if (PREV !== '.' && PREV !== ':') {
-      var la = look(0);
-      if (!(la[1] === '=' && BRACE > 0)) {
-        var nn = doRename ? resolve(name) : null;
-        if (nn) { emit(nn); stats.renamed++; return; }
-        if (doHideEnv && ENV_NAMES[name]) {
-          var data = utf8bytes(name);
-          var ck = cryptBytes(data);
-          POOL.push(ck);
-          var ph = POOLPFX + (POOL.length - 1);
-          // Delta rejects f()(args). Single-call IIFE with randomized locals.
-          if (la[1] === '(') {
-            var t1 = _rsym(2 + rnd(2)), t2 = _rsym(2 + rnd(2));
-            emit('(function(...)\nlocal ' + t1 + '=' + ENVFN + '(' + ph + ')\nreturn ' + t1 + '(...)\nend)');
-          } else {
-            emit(ENVFN + '(' + ph + ')');
-          }
-          stats.env_enc = (stats.env_enc || 0) + 1;
-          return;
-        }
-      }
+    if (PREV === '.' || PREV === ':') { emit(name); return; }
+    var nx = peek();
+    // table constructor field key: { name = value }
+    if (nx[1] === '=' && (PREV === '{' || PREV === ',') && BRACE > 0) { emit(name); return; }
+    var nn = resolve(name);
+    if (nn) { emit(nn); stats.renamed++; return; }
+    if (doHideEnv && has(ENV_NAMES, name) && nx[1] !== '=') {
+      emit(envLocal(name));
+      stats.env_enc++;
+      return;
     }
     emit(name);
   }
 
-  // -------- pool builder --------
-  function buildPoolCode(pool, delayStr) {
-    var nreal = pool.length;
-    if (nreal === 0) {
-      return {
-        code: '',
-        access: function () { return '(' + PREFIX + 'P0[1])'; },
-        slotCount: 0, poolCount: 0, decCount: 0
-      };
-    }
-    var NP = Math.min(6, Math.max(3, Math.ceil(nreal / 20)));
-    var subPools = [];
-    var i, j;
-    for (i = 0; i < NP; i++) subPools.push([]);
-    var off = rnd(NP);
-    for (i = 0; i < nreal; i++) {
-      var p = (i + off) % NP;
-      subPools[p].push({ idx: i, entry: pool[i] });
-    }
-    var seeds = [];
-    for (i = 0; i < NP; i++) {
-      var idxs = [];
-      for (j = 0; j < subPools[i].length; j++) idxs.push(j);
-      for (j = idxs.length - 1; j > 0; j--) {
-        var sw = rnd(j + 1);
-        var tmp = idxs[j]; idxs[j] = idxs[sw]; idxs[sw] = tmp;
-      }
-      seeds.push(idxs);
-    }
-    var NDEC = Math.min(6, Math.max(1, Math.floor(nreal / 40)));
-
-    // Decryptor: reconstructs k and q from slot + K (K is anti-tamper-adjusted
-    // SALT). The chain step is (slot * 17 + K*5 + 131) % 64; the per-slot key
-    // is ((KCHAIN[chainStep] + slot) % 256) — KCHAIN is embedded inline via
-    // a compact string. To keep source short we store KCHAIN in the decryptor
-    // preamble as a single decimal digit string and index it.
-    var chainPacked = '';
-    for (i = 0; i < KCHAIN.length; i++) {
-      chainPacked += (KCHAIN[i] < 10 ? '00' : (KCHAIN[i] < 100 ? '0' : '')) + KCHAIN[i];
-    }
-    // Random internal names (bound from outer scope when available)
-    var chN = (typeof CHVAR !== 'undefined' && CHVAR) ? CHVAR : (PREFIX + 'c');
-    var bxN = (typeof BXFN !== 'undefined' && BXFN) ? BXFN : (PREFIX + 'x');
-    var kyN = (typeof KEYFN !== 'undefined' && KEYFN) ? KEYFN : (PREFIX + 'y');
-    // Per-decryptor random local names to break template matching
-    function rloc() {
-      var s = '', k;
-      for (k = 0; k < 2 + rnd(2); k++) s += _alpha.charAt(rnd(26));
-      return s;
-    }
-
-    var decCode = '';
-    decCode += 'local ' + chN + '="' + chainPacked + '"\n'
-      + 'local function ' + bxN + '(a,b)\n'
-      + 'a=a%256\nb=b%256\nlocal r=0\n'
-      + 'for i=0,7 do\n'
-      + 'local x=a%2\nlocal y=b%2\n'
-      + 'if x~=y then r=r+2^i end\n'
-      + 'a=math.floor(a/2)\nb=math.floor(b/2)\n'
-      + 'end\nreturn r\nend\n'
-      + 'local function ' + kyN + '(s,kk)\n'
-      + 'local p=((s*17+kk*5+131)%' + KCHAIN.length + ')*3+1\n'
-      + 'local v=tonumber(' + chN + ':sub(p,p+2))\n'
-      + 'local k=(v+s)%256\nif k==0 then k=1 end\nreturn k\nend\n';
-
-    // Dual decryptor styles (forward + reverse) — both multi-line for Delta
-    NDEC = Math.min(6, Math.max(2, NDEC));
-    var decNames = [];
-    for (i = 0; i < NDEC; i++) {
-      var dn = PREFIX + rloc() + i.toString(36);
-      decNames.push(dn);
-      var lk = rloc(), lq = rloc(), lk2 = rloc(), lr = rloc(), lr2 = rloc(), lrs = rloc(), lb = rloc(), lp = rloc();
-      // lok = outer-layer key local name
-      var lok = rloc();
-      if (i % 2 === 0) {
-        // forward scan — reverse layer2 then layer1
-        decCode += 'local function ' + dn + '(h,s,K)\n'
-          + 'local ' + lk + '=' + kyN + '(s,K)\n'
-          + 'local ' + lq + '=s\n'
-          + 'local ' + lk2 + '=((' + lk + '*37+' + lq + '*91+K*13)%256)\n'
-          + 'if ' + lk2 + '==0 then ' + lk2 + '=1 end\n'
-          + 'local ' + lr + '=(' + lk + '*131+K*17+' + lq + '*29)%256\n'
-          + 'local ' + lr2 + '=(' + lk2 + '*53+' + lq + '*17)%256\n'
-          + 'local ' + lrs + '={}\n'
-          + 'for i=1,#h,2 do\n'
-          + 'local ' + lp + '=(i+1)/2\n'
-          + lr + '=(' + lr + '*73+(' + lp + '-1)*11+' + lk + ')%256\n'
-          + lr2 + '=(' + lr2 + '*47+(' + lp + '-1)*19+' + lk2 + ')%256\n'
-          + 'local ' + lb + '=tonumber(h:sub(i,i+1),16)\n'
-          // layer 2 reverse: nibble-swap (self-inverse) then XOR outer key
-          + 'local ' + lok + '=((' + lq + '*31+17+(' + lp + '-1)*13)%256)\n'
-          + 'if ' + lok + '==0 then ' + lok + '=1 end\n'
-          + lb + '=(((' + lb + '%16)*16)+math.floor(' + lb + '/16))%256\n'
-          + lb + '=' + bxN + '(' + lb + ',' + lok + ')\n'
-          // layer 1 reverse
-          + lb + '=((' + lb + '-' + lr2 + ')%256+256)%256\n'
-          + lb + '=' + bxN + '(' + lb + ',' + lr + ')\n'
-          + lb + '=((' + lb + '-' + lk + '-K-(' + lq + '*7)-((' + lp + '-1)*3))%256+256)%256\n'
-          + lrs + '[#' + lrs + '+1]=string.char(' + lb + ')\n'
-          + 'end\n'
-          + 'return table.concat(' + lrs + ')\n'
-          + 'end\n';
-      } else {
-        // alternate local structure, same two-layer reverse
-        decCode += 'local function ' + dn + '(h,s,K)\n'
-          + 'local ' + lk + '=' + kyN + '(s,K)\n'
-          + 'local ' + lq + '=s\n'
-          + 'local ' + lk2 + '=((' + lk + '*37+' + lq + '*91+K*13)%256)\n'
-          + 'if ' + lk2 + '==0 then ' + lk2 + '=1 end\n'
-          + 'local ' + lr + '=(' + lk + '*131+K*17+' + lq + '*29)%256\n'
-          + 'local ' + lr2 + '=(' + lk2 + '*53+' + lq + '*17)%256\n'
-          + 'local ' + lrs + '={}\n'
-          + 'local ' + lp + '=0\n'
-          + 'for i=1,#h,2 do\n'
-          + lp + '=' + lp + '+1\n'
-          + lr + '=(' + lr + '*73+(' + lp + '-1)*11+' + lk + ')%256\n'
-          + lr2 + '=(' + lr2 + '*47+(' + lp + '-1)*19+' + lk2 + ')%256\n'
-          + 'local ' + lb + '=tonumber(h:sub(i,i+1),16)\n'
-          + 'local ' + lok + '=((' + lq + '*31+17+(' + lp + '-1)*13)%256)\n'
-          + 'if ' + lok + '==0 then ' + lok + '=1 end\n'
-          + lb + '=(((' + lb + '%16)*16)+math.floor(' + lb + '/16))%256\n'
-          + lb + '=' + bxN + '(' + lb + ',' + lok + ')\n'
-          + lb + '=((' + lb + '-' + lr2 + ')%256+256)%256\n'
-          + lb + '=' + bxN + '(' + lb + ',' + lr + ')\n'
-          + lb + '=((' + lb + '-' + lk + '-K-(' + lq + '*7)-((' + lp + '-1)*3))%256+256)%256\n'
-          + lrs + '[' + lp + ']=string.char(' + lb + ')\n'
-          + 'end\n'
-          + 'return table.concat(' + lrs + ')\n'
-          + 'end\n';
-      }
-    }
-
-    // Index-base offsets for computed pool access (hides P[1], P[2] literals)
-    var poolCode = '';
-    var allSlotInfo = {};
-    var poolNames = [];
-    var indexBases = [];
-    for (i = 0; i < NP; i++) {
-      poolNames.push(PREFIX + rloc() + 't' + i.toString(36));
-      indexBases.push(1 + rnd(17)); // access as P[base + delta]
-    }
-    for (i = 0; i < NP; i++) {
-      var entries = [];
-      // Pad front with decoy nils so real entries sit at base+delta
-      var base = indexBases[i];
-      var pad = [];
-      for (j = 1; j < base; j++) pad.push('0');
-      for (j = 0; j < seeds[i].length; j++) {
-        var e = subPools[i][seeds[i][j]];
-        var didx = rnd(NDEC);
-        var dn2 = decNames[didx];
-        if (delayStr) {
-          entries.push('function() local v=' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K) return function() return v end end');
-        } else {
-          entries.push('function() return ' + dn2 + '("' + e.entry.hex + '",' + e.entry.slot + ',' + PREFIX + 'K) end');
-        }
-        allSlotInfo[e.idx] = { pool: i, shuffledIdx: base + j, base: base, delta: j };
-      }
-      if (entries.length > 0) {
-        poolCode += 'local ' + poolNames[i] + '={' + pad.concat(entries).join(',') + '}\n';
-      }
-    }
-    decCode += poolCode;
-
-    function access(slotIdx) {
-      var info = allSlotInfo[slotIdx];
-      if (!info) return poolNames[0] + '[1]';
-      // Computed index: P[(base)+(delta)] or P[base+delta] with opaque form
-      var form = rnd(3);
-      if (form === 0) {
-        return poolNames[info.pool] + '[' + info.base + '+' + info.delta + ']';
-      } else if (form === 1) {
-        return poolNames[info.pool] + '[' + (info.base + info.delta) + ']';
-      } else {
-        var a = info.base + rnd(3);
-        var b = a - info.base;
-        return poolNames[info.pool] + '[' + a + '-' + b + '+' + info.delta + ']';
-      }
-    }
-
-    return {
-      code: decCode,
-      access: access,
-      slotCount: nreal,
-      poolCount: NP,
-      decCount: NDEC
-    };
-  }
-
-  // -------- statement scanning (unchanged) --------
+  // ---------- statement scanning ----------
   function collectStmt() {
-    var start = POS, bd = 0, last = '=', tk, k, t, stack = [], top;
+    var start = POS, bd = 0, tk, k, t, stack = [], top, complete, la;
     for (;;) {
       tk = peek(); k = tk[0]; t = tk[1];
       if (k === null) break;
@@ -671,33 +1399,30 @@ function obfuscate(src, seed, opts) {
       }
       if (k === 'KW') {
         if (t === 'function' || t === 'if' || t === 'repeat') stack.push(t);
-        else if (t === 'for' || t === 'while') stack.push({w:t, head:true, pd:bd});
+        else if (t === 'for' || t === 'while') stack.push({ w: t, head: true, pd: bd });
         else if (t === 'do') {
           top = stack.length ? stack[stack.length - 1] : null;
           if (top && typeof top !== 'string' && top.head && bd === top.pd) top.head = false;
           else stack.push('do');
-        }
-        else if (t === 'end' || t === 'until') {
+        } else if (t === 'end' || t === 'until') {
           if (!stack.length) fail('unbalanced block in statement');
           top = stack.pop();
-          if ((t === 'end' && top === 'repeat') || (t === 'until' && top !== 'repeat'))
+          if ((t === 'end' && top === 'repeat') || (t === 'until' && top !== 'repeat')) {
             fail('mismatched block in statement');
+          }
         }
       }
       POS++;
-      last = t;
-      var complete = (COMPLETE_K[k] === 1) ||
-        ((k === 'KW' || k === 'SYM') && COMPLETE_V[t] === 1);
+      complete = COMPLETE_K[k] === 1 || ((k === 'KW' || k === 'SYM') && COMPLETE_V[t] === 1);
       if (bd === 0 && !stack.length && complete) {
-        var la = peek();
+        la = peek();
         if (la[0] === null || la[1] === ';') {
           if (la[0] !== null) POS++;
           break;
         }
-        if (la[0] === 'KW' && BLOCK_KW[la[1]]) break;
+        if (la[0] === 'KW' && has(BLOCK_KW, la[1])) break;
         if (la[0] === 'ID' || la[0] === 'NUM' || la[0] === 'STR' || la[0] === 'LSTR') {
-          if (!((k === 'ID' && (la[1] === '(' || la[1] === '{')) ||
-                (k === 'ID' && (la[0] === 'STR' || la[0] === 'LSTR')))) break;
+          if (!(k === 'ID' && (la[0] === 'STR' || la[0] === 'LSTR'))) break;
         }
       }
     }
@@ -716,6 +1441,7 @@ function obfuscate(src, seed, opts) {
     for (i = 0; i < chunk.length; i++) emit(chunk[i]);
   }
 
+  // ---------- parser / emitter ----------
   function parseBlock(stops) {
     var tk;
     for (;;) {
@@ -725,37 +1451,35 @@ function obfuscate(src, seed, opts) {
         return;
       }
       if (tk[0] === 'KW' && contains(stops, tk[1])) return;
-      if (tk[0] === 'KW' && (tk[1] === 'end' || tk[1] === 'else' || tk[1] === 'elseif' || tk[1] === 'until'))
+      if (tk[0] === 'KW' && (tk[1] === 'end' || tk[1] === 'else' || tk[1] === 'elseif' || tk[1] === 'until')) {
         fail('unexpected ' + tk[1]);
+      }
       parseStmt();
     }
   }
 
   function parseStmt() {
-    var tk = peek();
+    var tk = peek(), s, buf;
     if (tk[0] === 'KW' && tk[1] === 'local') parseLocal();
     else if (tk[0] === 'KW' && tk[1] === 'function') parseFunction();
     else if (tk[0] === 'KW' && tk[1] === 'if') parseIf();
     else if (tk[0] === 'KW' && tk[1] === 'while') {
       nxt(); emit('while');
-      if (doOpaque && rnd() < density) { emit(opaqueTrue()); emit('and'); stats.opaque = (stats.opaque || 0) + 1; }
+      if (doOpaque && rnd() < density) { emit(opaqueTrue()); emit('and'); stats.opaque++; }
       parseUntilKw('do');
       expect('do');
       push(); parseBlock(['end']); expect('end'); pop();
-    }
-    else if (tk[0] === 'KW' && tk[1] === 'for') parseFor();
+    } else if (tk[0] === 'KW' && tk[1] === 'for') parseFor();
     else if (tk[0] === 'KW' && tk[1] === 'repeat') {
       nxt(); emit('repeat');
       push(); parseBlock(['until']); expect('until');
-      var ubs = POS, ubuf = collectStmt();
-      runBuf(ubuf, BASE + ubs);
+      s = POS; buf = collectStmt();
+      runBuf(buf, BASE + s);
       pop();
-    }
-    else if (tk[0] === 'KW' && tk[1] === 'do') {
+    } else if (tk[0] === 'KW' && tk[1] === 'do') {
       nxt(); emit('do');
       push(); parseBlock(['end']); expect('end'); pop();
-    }
-    else parseTail();
+    } else parseTail();
   }
 
   function parseTail() {
@@ -779,9 +1503,8 @@ function obfuscate(src, seed, opts) {
     for (;;) {
       tk = peek(); k = tk[0]; t = tk[1];
       if (k === null) fail('eof seeking ' + stop);
-      if (k === 'KW' && t === 'function') { parseFunction(); continue; }
-      if (k === 'KW' && (t === 'if' || t === 'while' || t === 'for' || t === 'repeat')) { parseStmt(); continue; }
       if (k === 'KW' && t === stop) return;
+      if (k === 'KW' && t === 'function') { parseFunction(); continue; }
       tok = nxt();
       if (k === 'STR' || k === 'LSTR') emitStrTok(tok);
       else if (k === 'NUM') emitNum(t);
@@ -792,13 +1515,16 @@ function obfuscate(src, seed, opts) {
 
   function parseLocal() {
     nxt();
-    var tk = peek(), i, tok, names, fresh, lbs, lbuf;
+    var tk = peek(), tok, names = [], nns = [], i, s, fnn;
     if (tk[0] === 'KW' && tk[1] === 'function') {
-      nxt(); emit('local'); emit('function');
-      tok = nxt(); emit(declare(tok[1]));
-      parseBody(); return;
+      nxt();
+      tok = nxt();
+      fnn = newName(tok[1]);
+      bind(tok[1], fnn);            // bind before body so the function can recurse
+      emit('local'); emit('function'); emit(fnn);
+      parseBody();
+      return;
     }
-    names = [];
     for (;;) {
       tok = nxt();
       if (tok[0] !== 'ID') fail('bad local name ' + tok[1]);
@@ -807,30 +1533,24 @@ function obfuscate(src, seed, opts) {
       if (tk[0] === 'SYM' && tk[1] === ',') { nxt(); continue; }
       break;
     }
+    for (i = 0; i < names.length; i++) nns.push(newName(names[i]));
+    emit('local');
+    for (i = 0; i < nns.length; i++) { if (i) emit(','); emit(nns[i]); }
     tk = peek();
     if (tk[0] === 'SYM' && tk[1] === '=') {
-      nxt();
-      var lbs2 = POS, lbuf2 = collectStmt();
-      fresh = [];
-      for (i = 0; i < names.length; i++) fresh.push(declare(names[i]));
-      emit('local');
-      for (i = 0; i < fresh.length; i++) { if (i) emit(','); emit(fresh[i]); }
-      emit('=');
-      runBuf(lbuf2, BASE + lbs2);
-    } else {
-      emit('local');
-      for (i = 0; i < names.length; i++) {
-        if (i) emit(',');
-        emit(declare(names[i]));
-      }
+      nxt(); emit('=');
+      s = POS;
+      runBuf(collectStmt(), BASE + s);   // RHS resolves in the outer scope
     }
+    for (i = 0; i < names.length; i++) bind(names[i], nns[i]);
   }
 
   function parseFunction() {
     nxt(); emit('function');
     var tk = peek(), tok;
     if (tk[0] === 'ID') {
-      nxt(); emitId(tk[1]);
+      nxt();
+      emitRef(tk[1]);               // definition name: never env-encode
       for (;;) {
         tk = peek();
         if (tk[0] === 'SYM' && (tk[1] === '.' || tk[1] === ':')) {
@@ -843,15 +1563,16 @@ function obfuscate(src, seed, opts) {
   }
 
   function parseBody() {
+    curKey = 1 + rnd(4096);
     expect('(');
     push();
-    var tok, k, t;
+    var tok, k, t, nn;
     for (;;) {
       tok = nxt(); k = tok[0]; t = tok[1];
       if (k === 'SYM' && t === ')') { emit(')'); break; }
       if (k === 'SYM' && t === ',') { emit(','); continue; }
       if (k === 'SYM' && t === '...') { emit('...'); continue; }
-      if (k === 'ID') { emit(declare(t)); continue; }
+      if (k === 'ID') { nn = newName(t); bind(t, nn); emit(nn); continue; }
       fail('bad param ' + t);
     }
     parseBlock(['end']);
@@ -861,23 +1582,31 @@ function obfuscate(src, seed, opts) {
 
   function parseIf() {
     nxt(); emit('if');
-    if (doOpaque && rnd() < density) { emit(opaqueTrue()); emit('and'); stats.opaque = (stats.opaque || 0) + 1; }
+    if (doOpaque && rnd() < density) { emit(opaqueTrue()); emit('and'); stats.opaque++; }
     parseUntilKw('then'); expect('then');
     var tk;
     for (;;) {
       push(); parseBlock(['elseif', 'else', 'end']); pop();
       tk = peek();
       if (tk[0] === 'KW' && tk[1] === 'elseif') {
-        nxt(); emit('elseif'); parseUntilKw('then'); expect('then'); continue;
+        nxt(); emit('elseif'); parseUntilKw('then'); expect('then');
+        continue;
       }
-      if (tk[0] === 'KW' && tk[1] === 'else') { nxt(); emit('else'); continue; }
-      expect('end'); return;
+      if (tk[0] === 'KW' && tk[1] === 'else') {
+        nxt(); emit('else');
+        push(); parseBlock(['end']); pop();
+        expect('end');
+        return;
+      }
+      expect('end');
+      return;
     }
   }
 
   function parseFor() {
     nxt();
-    var names = [], tk, tok, i, mode;
+    var names = [], tk, tok, i, mode, start, pd, hdr, hdrOut, fresh = [];
+    var sT, sP, sO, sB, sPrev;
     for (;;) {
       tok = nxt();
       if (tok[0] !== 'ID') fail('bad for name');
@@ -891,7 +1620,7 @@ function obfuscate(src, seed, opts) {
     else if (tk[0] === 'KW' && tk[1] === 'in') mode = 'in';
     else fail('bad for header');
     nxt();
-    var start = POS, pd = 0, hdr, hdrOut, j;
+    start = POS; pd = 0;
     for (;;) {
       tk = peek();
       if (tk[0] === null) fail('eof in for header');
@@ -901,13 +1630,10 @@ function obfuscate(src, seed, opts) {
       nxt();
     }
     hdr = T.slice(start, POS);
-    for (j = 0; j < hdr.length; j++) {
-      if (hdr[j][0] === 'KW' && hdr[j][1] === 'function')
-        fail('function in for-header unsupported');
-    }
-    nxt();
-    push();
-    var sT = T, sP = POS, sO = OUT, sB = BRACE, sPrev = PREV;
+    nxt();                          // 'do'
+
+    // header expressions resolve in the outer scope
+    sT = T; sP = POS; sO = OUT; sB = BRACE; sPrev = PREV;
     BASEST.push(BASE); BASE = BASE + start;
     T = hdr; POS = 0; OUT = [];
     parseTail();
@@ -915,19 +1641,21 @@ function obfuscate(src, seed, opts) {
     hdrOut = OUT;
     T = sT; POS = sP; OUT = sO; BRACE = sB; PREV = sPrev;
     BASE = BASEST.pop();
-    var fresh = [];
-    for (i = 0; i < names.length; i++) fresh.push(declare(names[i]));
+
+    for (i = 0; i < names.length; i++) fresh.push(newName(names[i]));
     emit('for');
     for (i = 0; i < fresh.length; i++) { if (i) emit(','); emit(fresh[i]); }
     emit(mode);
     for (i = 0; i < hdrOut.length; i++) emit(hdrOut[i]);
     emit('do');
+    push();
+    for (i = 0; i < names.length; i++) bind(names[i], fresh[i]);
     parseBlock(['end']);
     expect('end');
     pop();
   }
 
-  // -------- render (stringify tokens) --------
+  // ---------- render ----------
   function render(pieces) {
     var out = [], prev = '', i, cur, pl, cf;
     for (i = 0; i < pieces.length; i++) {
@@ -939,10 +1667,9 @@ function obfuscate(src, seed, opts) {
             prev === '(' || prev === '[' || prev === '{') { }
         else if (cur === '.' || cur === ':' || prev === '.' || prev === ':') { }
         else if (cur === '(' || prev === ')') { }
-        else if ((isAlnum(pl) || pl === '_') && (isAlnum(cf) || cf === '_')) out.push(' ');
+        else if ((isAlnum(pl)) && (isAlnum(cf))) out.push(' ');
         else if (cur === '-' && pl === '-') out.push(' ');
-        else if (isDigit(pl) && (isAlnum(cf) || cf === '_' || cf === '.')) out.push(' ');
-        else if (isDigit(cf) && (isAlnum(pl) || pl === '_' || pl === '.')) out.push(' ');
+        else if (isDigit(pl) && (cf === '.')) out.push(' ');
         else if (cur === '..' || cur === '...' || prev === '..' || prev === '...') out.push(' ');
       }
       out.push(cur);
@@ -951,480 +1678,284 @@ function obfuscate(src, seed, opts) {
     return out.join('');
   }
 
-  // -------- CFF: real CFG-based on tokens --------
-  // For each `function ... end` in the token array, split its body into
-  // statements, verify safe-to-flatten (no mid-body return/break/goto/continue,
-  // no repeat-until body that must preserve do-while semantics), then wrap.
-  // Skips bodies smaller than CFF_MIN_STMTS statements.
-  function applyCFF(tokens, prefix, seedTag) {
-    var CFF_MIN_STMTS = 5;
-    var out = [];
-    var i = 0;
-    var n = tokens.length;
-
-    function findBodyEnd(startIdx) {
-      // Finds the index of the `end` that closes a block opened at startIdx.
-      // Tokens are rendered; openers are function/if/do/while/for/repeat.
-      // We do not descend into the string that a return may contain.
-      var stack = [];
-      var k = startIdx;
-      while (k < n) {
-        var t = tokens[k];
-        if (t === 'function' || t === 'if' || t === 'do' || t === 'while' || t === 'for') {
-          stack.push(t);
-        } else if (t === 'repeat') {
-          stack.push('repeat');
-        } else if (t === 'end') {
-          if (!stack.length) return k;
-          stack.pop();
-        } else if (t === 'until') {
-          if (stack.length && stack[stack.length - 1] === 'repeat') stack.pop();
-        }
-        k++;
-      }
-      return -1;
+  // ---------- CFF (control-flow flattening) ----------
+  function isValueEnd(t) {
+    if (t === undefined || t === null) return false;
+    if (t === ')' || t === ']' || t === '}' || t === 'end' || t === 'until' || t === '...') return true;
+    var c = t.charAt(0);
+    if (c === '"' || c === "'") return true;
+    if (isAlnum(c)) {
+      if (has(KEYWORDS, t)) return t === 'nil' || t === 'true' || t === 'false';
+      return true;
     }
+    return false;
+  }
 
+  function findBodyEnd(tokens, start) {
+    var d = 0, k, t;
+    for (k = start; k < tokens.length; k++) {
+      t = tokens[k];
+      if (has(BLOCK_OPEN, t)) d++;
+      else if (t === 'end' || t === 'until') {
+        if (d === 0) return t === 'end' ? k : -1;
+        d--;
+      }
+    }
+    return -1;
+  }
+
+  // return and break are safe inside the dispatch loop: a return ends the function
+  // from any depth, and a break in the body can only belong to a loop nested in
+  // the body. goto and continue are not handled, so those bodies stay verbatim.
+  function needsBail(toks) {
+    for (var k = 0; k < toks.length; k++) {
+      var t = toks[k];
+      if (t === 'goto' || t === 'continue') return true;
+    }
+    return false;
+  }
+
+  function isIdentTok(t) {
+    return typeof t === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(t) && !has(KEYWORDS, t);
+  }
+
+  // Hoists block-depth-0 local declarations so the dispatch loop can keep them in
+  // scope across states. Renamed locals are unique, so hoisting cannot merge two
+  // bindings. With rename off we cannot tell shadowed names apart, so we bail.
+  //   local a, b = e1, e2   ->  a, b = e1, e2
+  //   local a, b            ->  (dropped; hoisted names are nil at each call)
+  //   local function f ...  ->  f = function ...
+  // Returns { toks, names } or null.
+  function hoistLocals(toks) {
+    var out = [], names = [], seen = {}, d = 0, b = 0, i = 0, j, t, decl, k;
+    function addName(nm) {
+      if (!doRename || !isIdentTok(nm) || has(seen, nm)) return false;
+      seen[nm] = 1;
+      names.push(nm);
+      return true;
+    }
+    while (i < toks.length) {
+      t = toks[i];
+      if (d === 0 && b === 0 && t === 'local') {
+        if (toks[i + 1] === 'function') {
+          if (!addName(toks[i + 2])) return null;
+          out.push(toks[i + 2], '=', 'function');
+          b++;
+          i += 3;
+          continue;
+        }
+        decl = [];
+        j = i + 1;
+        for (;;) {
+          if (!addName(toks[j])) return null;
+          decl.push(toks[j]);
+          j++;
+          if (toks[j] === ',') { j++; continue; }
+          break;
+        }
+        if (toks[j] === '=') {
+          for (k = 0; k < decl.length; k++) { if (k) out.push(','); out.push(decl[k]); }
+        }
+        i = j;
+        continue;
+      }
+      out.push(t);
+      if (t === '(' || t === '[' || t === '{') d++;
+      else if (t === ')' || t === ']' || t === '}') d--;
+      else if (has(BLOCK_OPEN, t)) b++;
+      else if (t === 'end' || t === 'until') b--;
+      i++;
+    }
+    return { toks: out, names: names };
+  }
+
+  // Split a body into top-level statements at block depth 0, bracket depth 0.
+  function splitBody(toks) {
+    var stmts = [], cur = [], depth = 0, blk = 0, i, t, prev = null;
+    for (i = 0; i < toks.length; i++) {
+      t = toks[i];
+      if (depth === 0 && blk === 0) {
+        if (t === ';') {
+          if (cur.length) { stmts.push(cur); cur = []; }
+          prev = null;
+          continue;
+        }
+        // After a value-ending token, a name or statement keyword cannot continue
+        // the expression, so it always begins the next statement.
+        if ((has(STARTERS, t) || isIdentTok(t)) && cur.length && isValueEnd(prev)) {
+          stmts.push(cur); cur = [];
+        }
+      }
+      cur.push(t);
+      if (t === '(' || t === '[' || t === '{') depth++;
+      else if (t === ')' || t === ']' || t === '}') depth--;
+      else if (has(BLOCK_OPEN, t)) blk++;
+      else if (t === 'end' || t === 'until') blk--;
+      prev = t;
+    }
+    if (cur.length) stmts.push(cur);
+    return stmts;
+  }
+
+  function applyCFF(tokens) {
+    var out = [], i = 0, n = tokens.length, paren, bodyStart, bodyEnd, inner, stmts, k, j, sv, tk, h;
     while (i < n) {
-      var t = tokens[i];
-      if (t !== 'function') { out.push(t); i++; continue; }
-      out.push(t); i++;
-      // Skip parameters
-      var paren = 0;
+      if (tokens[i] !== 'function') { out.push(tokens[i]); i++; continue; }
+      out.push('function'); i++;
+      paren = 0;
       while (i < n) {
-        var tk = tokens[i];
-        if (tk === '(') paren++;
-        else if (tk === ')') { paren--; if (paren === 0) { out.push(tk); i++; break; } }
+        tk = tokens[i];
         out.push(tk); i++;
+        if (tk === '(') paren++;
+        else if (tk === ')') { paren--; if (paren === 0) break; }
       }
-      var bodyStart = i;
-      var bodyEnd = findBodyEnd(bodyStart);
-      if (bodyEnd < 0) { i = bodyStart; continue; }
+      bodyStart = i;
+      bodyEnd = findBodyEnd(tokens, bodyStart);
+      if (bodyEnd < 0) continue;
+      inner = tokens.slice(bodyStart, bodyEnd);
+      if (inner.length < 8 || needsBail(inner)) continue;
+      h = hoistLocals(inner);
+      if (!h) continue;
+      stmts = splitBody(h.toks);
+      if (stmts.length < 5) continue;
 
-      // Safety: no return/break/goto/continue at depth 0 in body
-      var d = 0, k2 = bodyStart, safe = true, hasBlock = false;
-      while (k2 < bodyEnd) {
-        var tk2 = tokens[k2];
-        if (tk2 === '(' || tk2 === '[' || tk2 === '{') d++;
-        else if (tk2 === ')' || tk2 === ']' || tk2 === '}') d--;
-        else if (d === 0) {
-          if (tk2 === 'return' || tk2 === 'break' || tk2 === 'continue' || tk2 === 'goto') { safe = false; break; }
-          // Nested function/if/while/for/do/repeat are fine (they end in `end` or `until`).
-        }
-        k2++;
-      }
-      if (!safe) {
-        // Copy body verbatim
-        for (var q = bodyStart; q < bodyEnd; q++) out.push(tokens[q]);
-        out.push(tokens[bodyEnd]); i = bodyEnd + 1; continue;
-      }
-
-      // Split into statements at depth-0 `;` or heuristic boundaries
-      var stmts = [];
-      var st = bodyStart, d2 = 0, k3 = bodyStart;
-      while (k3 < bodyEnd) {
-        var tk3 = tokens[k3];
-        if (tk3 === '(' || tk3 === '[' || tk3 === '{') d2++;
-        else if (tk3 === ')' || tk3 === ']' || tk3 === '}') d2--;
-        else if (d2 === 0) {
-          if (tk3 === ';') {
-            stmts.push(tokens.slice(st, k3));
-            st = k3 + 1;
-          } else if (tk3 === 'local' || tk3 === 'function' || tk3 === 'if' ||
-                     tk3 === 'while' || tk3 === 'for' || tk3 === 'repeat' ||
-                     tk3 === 'do' || tk3 === 'return') {
-            // Check if previous token ended a statement
-            if (st < k3) { stmts.push(tokens.slice(st, k3)); st = k3; }
-          }
-        }
-        k3++;
-      }
-      if (st < bodyEnd) stmts.push(tokens.slice(st, bodyEnd));
-
-      if (stmts.length < CFF_MIN_STMTS) {
-        for (var q2 = bodyStart; q2 < bodyEnd; q2++) out.push(tokens[q2]);
-        out.push(tokens[bodyEnd]); i = bodyEnd + 1; continue;
-      }
-
-      // Collect locals declared in this body (to hoist for scope preservation)
-      // We don't actually need to hoist if dispatch is `while true do ... end`
-      // and we inject the body inside the while — but locals declared in the
-      // body would be visible outside only if we keep `end` at same level.
-      // Solution: keep `local` declarations as first statements of block 0
-      // inside the while — which is legal, but a `return` at the end exits
-      // the while AND the function together. Fine.
-
-      var N = stmts.length;
-      var sv = prefix + 's' + (COUNTER++);
-      // Encode states as (_s * KMUL + KADD) % N
-      var KMUL = 3 + rnd(97);
-      var KADD = 1 + rnd(251);
-      var stateSeq = [];
-      for (var si = 0; si < N; si++) stateSeq.push(si);
-
-      // Emit dispatch
-      out.push('local ' + sv + '=');
-      out.push('' + (0 * KMUL + KADD)); // encoded state 0
-      out.push(';');
-      out.push('while true do');
-      // Decode state to var _cur
-      var cur = prefix + 'u' + (COUNTER++);
-      out.push('local ' + cur + '=');
-      out.push('((' + sv + '-' + KADD + ')*' + rnd(97) + ')%' + N + ');');
-      // Technically that's wrong math (multiplication by arbitrary constant
-      // doesn't reverse the modulo). Simpler: emit direct state var and
-      // dispatch with opacity through the while condition itself.
-      // Replace above with a safe form: state var is the decoded value; the
-      // opaque check gates the "loop must terminate" invariant.
-      out.pop(); out.pop(); out.pop();
-      out.push('local ' + cur + '=0;');
-      out.push('while (' + sv + '==' + sv + ') do');
-      // Chained if/elseif dispatch
-      for (var bi = 0; bi < N; bi++) {
-        var isFirst = (bi === 0);
-        var isLast = (bi === N - 1);
-        out.push(isFirst ? 'if ' : 'elseif ');
-        out.push(cur + '==' + bi);
-        out.push(' then ');
-        // Emit statement tokens
-        for (var ti = 0; ti < stmts[bi].length; ti++) out.push(stmts[bi][ti]);
+      if (h.names.length) {
+        out.push('local');
+        for (k = 0; k < h.names.length; k++) { if (k) out.push(','); out.push(h.names[k]); }
         out.push(';');
-        if (!isLast) {
-          out.push(cur + '=' + (bi + 1) + ';');
-        } else {
-          out.push('break;');
-        }
+        stats.cff_hoisted = (stats.cff_hoisted || 0) + h.names.length;
       }
-      out.push('end');  // end of if/elseif
-      out.push('end');  // end of while (dispatch loop)
-      out.push(tokens[bodyEnd]); // the original `end`
-      i = bodyEnd + 1;
+      sv = inm('V');
+      out.push('local', sv, '=', '0', ';', 'while', 'true', 'do');
+      for (k = 0; k < stmts.length; k++) {
+        // do...end makes a trailing 'return' legal inside a state.
+        out.push(k === 0 ? 'if' : 'elseif', sv, '==', String(k), 'then', 'do');
+        for (j = 0; j < stmts[k].length; j++) out.push(stmts[k][j]);
+        out.push('end', ';', sv, '=', String(k + 1), ';');
+      }
+      out.push('else', 'break', 'end', 'end');
+      stats.cff_fns++;
+      i = bodyEnd;                   // main loop pushes the function's 'end'
     }
     return out;
   }
 
-  // -------- VM shell (real stack-machine) --------
-  function buildVmShell(payload, prefix, stats) {
-    var OP = {
-      PUSHN: rnd(256), PUSHS: rnd(256),
-      PUSHNIL: rnd(256), PUSHTRUE: rnd(256), PUSHFALSE: rnd(256),
-      POP: rnd(256), DUP: rnd(256),
-      ADD: rnd(256), SUB: rnd(256), MUL: rnd(256), DIV: rnd(256),
-      MOD: rnd(256), POW: rnd(256), CAT: rnd(256),
-      EQ: rnd(256), NE: rnd(256), LT: rnd(256), LE: rnd(256), GT: rnd(256), GE: rnd(256),
-      NOT: rnd(256), NEG: rnd(256), LEN: rnd(256),
-      JMP: rnd(256), JZ: rnd(256), JNZ: rnd(256),
-      LOADK: rnd(256), STOREK: rnd(256),
-      GETG: rnd(256), SETG: rnd(256),
-      INDEX: rnd(256), SETINDEX: rnd(256),
-      CALL: rnd(256), RETURN: rnd(256),
-      HALT: rnd(256),
-      CONCATN: rnd(256), MAKEARR: rnd(256),
-      PRINT: rnd(256)
-    };
+  // ---------- decryptor / pool ----------
+  function decSrc(name) {
+    return tpl('local function ' + name + '(@h@,@s@,@K@)\n'
+      + 'local @k@=' + KYN + '(@s@,@K@)\n'
+      + 'local @q@=@s@\n'
+      + 'local @k2@=(@k@*37+@q@*91+@K@*13)%256 if @k2@==0 then @k2@=1 end\n'
+      + 'local @r1@=(@k@*131+@K@*17+@q@*29)%256\n'
+      + 'local @r2@=(@k2@*53+@q@*17)%256\n'
+      + 'local @o@={}\n'
+      + 'for @j@=0,#@h@/2-1 do\n'
+      + '@r1@=(@r1@*73+@j@*11+@k@)%256\n'
+      + '@r2@=(@r2@*47+@j@*19+@k2@)%256\n'
+      + 'local @b@=tonumber(@h@:sub(@j@*2+1,@j@*2+2),16)\n'
+      + 'local @ok@=(@q@*31+17+@j@*13)%256 if @ok@==0 then @ok@=1 end\n'
+      + '@b@=((@b@%16)*16+math.floor(@b@/16))%256\n'
+      + '@b@=' + BXN + '(@b@,@ok@)\n'
+      + '@b@=(@b@-@r2@)%256\n'
+      + '@b@=' + BXN + '(@b@,@r1@)\n'
+      + '@b@=(@b@-@k@-@K@-@q@*7-@j@*3)%256\n'
+      + '@o@[#@o@+1]=string.char(@b@)\n'
+      + 'end\n'
+      + 'return table.concat(@o@)\n'
+      + 'end;\n');
+  }
 
-    var code = [];
-    var nums = [];
-    var strs = [];
+  // Mode 1 decryptor: inverse of cryptBytes mode 1 (per-byte additive chain).
+  function decSrcAdd(name) {
+    return tpl('local function ' + name + '(@h@,@s@,@K@)\n'
+      + 'local @k@=' + KYN + '(@s@,@K@)\n'
+      + 'local @o@={}\n'
+      + 'for @j@=0,#@h@/2-1 do\n'
+      + 'local @b@=(tonumber(@h@:sub(@j@*2+1,@j@*2+2),16)-(@k@*11+@s@*3+@j@*7+@K@)%256)%256\n'
+      + '@o@[#@o@+1]=string.char(@b@)\n'
+      + 'end\n'
+      + 'return table.concat(@o@)\n'
+      + 'end;\n');
+  }
 
-    function nIdx(v) { for (var q = 0; q < nums.length; q++) if (nums[q] === v) return q; nums.push(v); return nums.length - 1; }
-    function sIdx(v) { for (var q = 0; q < strs.length; q++) if (strs[q] === v) return q; strs.push(v); return strs.length - 1; }
-
-    var toks;
-    try { toks = tokenize(payload); } catch (e) { return { code: null, reason: 'tokenize failed: ' + e.message }; }
-
-    var i = 0;
-    var locals = {};
-    var nlocals = 0;
-
-    function compileExpr(term) {
-      var p = 0;
-      function peekT() { return term[p]; }
-      function nextT() { return term[p++]; }
-      function parsePrimary() {
-        var t = peekT();
-        if (!t) return false;
-        if (t[0] === 'NUM') { code.push([OP.PUSHN, nIdx(parseFloat(t[1].replace(/_/g, '')))]); nextT(); return true; }
-        if (t[0] === 'STR') {
-          var raw = t[3];
-          var bytes = decodeShort(raw);
-          if (bytes === null) return false;
-          var s = '';
-          for (var k = 0; k < bytes.length; k++) s += String.fromCharCode(bytes[k]);
-          code.push([OP.PUSHS, sIdx(s)]); nextT(); return true;
-        }
-        if (t[1] === 'nil')   { code.push([OP.PUSHNIL, 0]);   nextT(); return true; }
-        if (t[1] === 'true')  { code.push([OP.PUSHTRUE, 0]);  nextT(); return true; }
-        if (t[1] === 'false') { code.push([OP.PUSHFALSE, 0]); nextT(); return true; }
-        if (t[1] === '(') {
-          nextT();
-          if (!parseExpr()) return false;
-          if (!peekT() || peekT()[1] !== ')') return false;
-          nextT(); return true;
-        }
-        if (t[0] === 'ID' && locals[t[1]] !== undefined) {
-          code.push([OP.LOADK, locals[t[1]]]); nextT(); return true;
-        }
-        return false;
+  function buildPool(list) {
+    var R = list.length, NP, i, j, code = '', decNames = [], groups = [], tnames = [], parts, e, dn, tn, idx, call;
+    NP = Math.min(6, Math.max(1, Math.ceil(R / 24)));
+    decNames.push(inm('D'), inm('D'));
+    code += decSrc(decNames[0]) + decSrcAdd(decNames[1]);
+    for (i = 0; i < NP; i++) groups.push([]);
+    for (i = 0; i < R; i++) groups[i % NP].push(i);
+    for (i = 0; i < NP; i++) {
+      tn = inm('T');
+      tnames.push(tn);
+      parts = [];
+      for (j = 0; j < groups[i].length; j++) {
+        idx = groups[i][j];
+        e = list[idx];
+        dn = decNames[e.mode];
+        call = dn + '("' + e.hex + '",' + e.slot + ',' + KN + ')';
+        if (doDelayStr) parts.push('[' + (idx + 1) + ']=function() local v=' + call + ' return function() return v end end');
+        else parts.push('[' + (idx + 1) + ']=function() return ' + call + ' end');
       }
-      function parseUnary() {
-        var t = peekT();
-        if (t && t[1] === '-')   { nextT(); if (!parseUnary()) return false; code.push([OP.NEG, 0]); return true; }
-        if (t && t[1] === 'not') { nextT(); if (!parseUnary()) return false; code.push([OP.NOT, 0]); return true; }
-        if (t && t[1] === '#')   { nextT(); if (!parseUnary()) return false; code.push([OP.LEN, 0]); return true; }
-        return parsePrimary();
-      }
-      function parseExpr() {
-        if (!parseUnary()) return false;
-        for (;;) {
-          var t = peekT();
-          if (!t) return true;
-          var op = t[1];
-          if (op === '+')   { nextT(); if (!parseUnary()) return false; code.push([OP.ADD, 0]); }
-          else if (op === '-')   { nextT(); if (!parseUnary()) return false; code.push([OP.SUB, 0]); }
-          else if (op === '*')   { nextT(); if (!parseUnary()) return false; code.push([OP.MUL, 0]); }
-          else if (op === '/')   { nextT(); if (!parseUnary()) return false; code.push([OP.DIV, 0]); }
-          else if (op === '%')   { nextT(); if (!parseUnary()) return false; code.push([OP.MOD, 0]); }
-          else if (op === '^')   { nextT(); if (!parseUnary()) return false; code.push([OP.POW, 0]); }
-          else if (op === '..')  { nextT(); if (!parseUnary()) return false; code.push([OP.CAT, 0]); }
-          else if (op === '==')  { nextT(); if (!parseUnary()) return false; code.push([OP.EQ, 0]); }
-          else if (op === '~=')  { nextT(); if (!parseUnary()) return false; code.push([OP.NE, 0]); }
-          else if (op === '<')   { nextT(); if (!parseUnary()) return false; code.push([OP.LT, 0]); }
-          else if (op === '<=')  { nextT(); if (!parseUnary()) return false; code.push([OP.LE, 0]); }
-          else if (op === '>')   { nextT(); if (!parseUnary()) return false; code.push([OP.GT, 0]); }
-          else if (op === '>=')  { nextT(); if (!parseUnary()) return false; code.push([OP.GE, 0]); }
-          else return true;
-        }
-      }
-      return parseExpr();
+      if (parts.length) code += 'local ' + tn + '={\n' + parts.join(',\n') + '\n};\n';
     }
-
-    try {
-      while (i < toks.length) {
-        var tk = toks[i];
-        if (tk[0] === 'KW' && tk[1] === 'local') {
-          i++;
-          var name = toks[i];
-          if (!name || name[0] !== 'ID') throw new Error('vm: bad local');
-          var nm = name[1];
-          i++;
-          if (!toks[i] || toks[i][1] !== '=') throw new Error('vm: local needs =');
-          i++;
-          var start = i;
-          var d = 0, j = i;
-          while (j < toks.length) {
-            var tj = toks[j][1];
-            if (tj === '(' || tj === '[' || tj === '{') d++;
-            else if (tj === ')' || tj === ']' || tj === '}') d--;
-            if (d === 0 && j + 1 < toks.length) {
-              var nx = toks[j + 1][1];
-              if (nx === ';' || nx === 'local' || nx === 'print' || nx === 'return' || nx === 'if' || nx === 'while' || nx === 'for') break;
-            }
-            j++;
-          }
-          var exprToks = toks.slice(start, j);
-          if (!compileExpr(exprToks)) throw new Error('vm: unsupported expr');
-          var reg = nlocals++;
-          locals[nm] = reg;
-          code.push([OP.STOREK, reg]);
-          if (j < toks.length && toks[j][1] === ';') j++;
-          i = j;
-        } else if (tk[0] === 'ID' && tk[1] === 'print') {
-          i++;
-          if (toks[i][1] !== '(') throw new Error('vm: print needs (');
-          i++;
-          var s2 = i, d2 = 1;
-          while (i < toks.length && d2 > 0) {
-            var tx = toks[i][1];
-            if (tx === '(') d2++;
-            else if (tx === ')') d2--;
-            if (d2 > 0) i++;
-          }
-          var argToks = toks.slice(s2, i);
-          if (!compileExpr(argToks)) throw new Error('vm: unsupported print arg');
-          if (!toks[i] || toks[i][1] !== ')') throw new Error('vm: print missing )');
-          i++;
-          code.push([OP.PRINT, 0]);
-        } else {
-          throw new Error('vm: unsupported toplevel: ' + tk[1]);
-        }
-      }
-    } catch (e) {
-      return { code: null, reason: e.message };
+    function access(index) {
+      var t = tnames[index % NP], k = index + 1, a;
+      if (rnd(2) === 0) return t + '[' + k + ']';
+      a = 1 + rnd(90);
+      return t + '[(' + (k + a) + ')-' + a + ']';
     }
-    code.push([OP.HALT, 0]);
+    return { code: code, access: access };
+  }
 
-    var numPool = 'local ' + prefix + 'N={' + nums.join(',') + '};';
-    var strHex = [];
-    for (var si = 0; si < strs.length; si++) {
-      var s = strs[si];
-      var hx = '';
-      for (var kk = 0; kk < s.length; kk++) {
-        var h = s.charCodeAt(kk).toString(16);
-        while (h.length < 4) h = '0' + h;
-        hx += h;
-      }
-      strHex.push(hx);
+  function decodeCall(index) {
+    return pool.access(index) + (doDelayStr ? '()()' : '()');
+  }
+
+  function headSrc(p) {
+    var h = '', i, e, chainPacked = '';
+    for (i = 0; i < KCHAIN.length; i++) {
+      chainPacked += (KCHAIN[i] < 10 ? '00' : (KCHAIN[i] < 100 ? '0' : '')) + KCHAIN[i];
     }
-    var strPool = 'local ' + prefix + 'S={' + strHex.map(function (h) { return '"' + h + '"'; }).join(',') + '};';
-
-    var opEntries = [];
-    for (var opName in OP) if (Object.prototype.hasOwnProperty.call(OP, opName)) opEntries.push([OP[opName], opName]);
-    for (var oi = opEntries.length - 1; oi > 0; oi--) {
-      var osw = rnd(oi + 1);
-      var otmp = opEntries[oi]; opEntries[oi] = opEntries[osw]; opEntries[osw] = otmp;
+    if (doAnti) {
+      h += 'local ' + KN + '=' + SALT + ';\n'
+        + 'if type(print)~="function" or type(string.char)~="function" then ' + KN + '=(' + KN + '+1)%256 end;\n';
+    } else {
+      h += 'local ' + KN + '=' + SALT + ';\n';
     }
-    var tblParts = [];
-    for (var tbi = 0; tbi < opEntries.length; tbi++) {
-      tblParts.push(opEntries[tbi][0] + ':"' + opEntries[tbi][1] + '"');
+    if (doHideEnv) {
+      h += tpl('local function ' + ENVFN + '(@n@)\n'
+        + 'local @g@=getgenv and getgenv()\n'
+        + 'if type(@g@)=="table" and @g@[@n@]~=nil then return @g@[@n@] end\n'
+        + '@g@=getrenv and getrenv()\n'
+        + 'if type(@g@)=="table" and @g@[@n@]~=nil then return @g@[@n@] end\n'
+        + 'if type(_G)=="table" then return _G[@n@] end\n'
+        + 'return nil\nend;\n');
     }
-    var opTbl = 'local ' + prefix + 'T={' + tblParts.join(',') + '};';
-
-    var bc = '[';
-    for (var bi2 = 0; bi2 < code.length; bi2++) {
-      if (bi2 > 0) bc += ',';
-      bc += '[' + code[bi2][0] + ',' + code[bi2][1] + ']';
+    h += 'local ' + CHN + '="' + chainPacked + '";\n';
+    h += tpl('local function ' + BXN + '(@a@,@b@)\n'
+      + 'local @r@=0\n'
+      + 'for @i@=0,7 do\n'
+      + 'if @a@%2~=@b@%2 then @r@=@r@+2^@i@ end\n'
+      + '@a@=math.floor(@a@/2) @b@=math.floor(@b@/2)\n'
+      + 'end\nreturn @r@\nend;\n');
+    h += tpl('local function ' + KYN + '(@s@,@kk@)\n'
+      + 'local @p@=((@s@*17+@kk@*5+131)%' + KCHAIN.length + ')*3+1\n'
+      + 'local @k@=(tonumber(' + CHN + ':sub(@p@,@p@+2))+@s@)%256\n'
+      + 'if @k@==0 then @k@=1 end\nreturn @k@\nend;\n');
+    h += p.code;
+    for (i = 0; i < envOrder.length; i++) {
+      e = envUsed[envOrder[i]];
+      h += 'local ' + e.nm + '=' + ENVFN + '(' + decodeCall(e.pidx) + ');\n';
     }
-    bc += ']';
-
-    var runtime = ''
-      + 'local ' + prefix + 'st={};'
-      + 'local ' + prefix + 'pc=1;'
-      + 'local ' + prefix + 'sp=0;'
-      + 'local ' + prefix + 'L={};'
-      + 'local function ' + prefix + 'po()local v=' + prefix + 'st[' + prefix + 'sp];' + prefix + 'sp=' + prefix + 'sp-1;return v end;'
-      + 'local function ' + prefix + 'pu(v)' + prefix + 'sp=' + prefix + 'sp+1;' + prefix + 'st[' + prefix + 'sp]=v end;'
-      + 'local ' + prefix + 'B=' + bc + ';'
-      + 'local ' + prefix + 'T=' + opTbl + ';'
-      + 'local ' + prefix + 'N=' + numPool + ';'
-      + 'local ' + prefix + 'S=' + strPool + ';'
-      + 'local function ' + prefix + 'gs(i)local h=' + prefix + 'S[i+1];local o={};for k=1,#h,4 do o[#o+1]=string.char(tonumber(h:sub(k,k+3),16))end;return table.concat(o)end;'
-      + 'while true do '
-      + 'local op=' + prefix + 'B[' + prefix + 'pc];'
-      + 'if not op then break end;'
-      + 'local n=' + prefix + 'T[op[1]];'
-      + 'local a=op[2];'
-      + prefix + 'pc=' + prefix + 'pc+1;'
-      + 'if n=="PUSHN"then ' + prefix + 'pu(' + prefix + 'N[a+1])'
-      + 'elseif n=="PUSHS"then ' + prefix + 'pu(' + prefix + 'gs(a))'
-      + 'elseif n=="PUSHNIL"then ' + prefix + 'pu(nil)'
-      + 'elseif n=="PUSHTRUE"then ' + prefix + 'pu(true)'
-      + 'elseif n=="PUSHFALSE"then ' + prefix + 'pu(false)'
-      + 'elseif n=="POP"then ' + prefix + 'po()'
-      + 'elseif n=="DUP"then local v=' + prefix + 'po();' + prefix + 'pu(v);' + prefix + 'pu(v)'
-      + 'elseif n=="ADD"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2+b)'
-      + 'elseif n=="SUB"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2-b)'
-      + 'elseif n=="MUL"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2*b)'
-      + 'elseif n=="DIV"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2/b)'
-      + 'elseif n=="MOD"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2%b)'
-      + 'elseif n=="POW"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2^b)'
-      + 'elseif n=="CAT"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2..b)'
-      + 'elseif n=="EQ"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2==b)'
-      + 'elseif n=="NE"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2~=b)'
-      + 'elseif n=="LT"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2<b)'
-      + 'elseif n=="LE"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2<=b)'
-      + 'elseif n=="GT"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2>b)'
-      + 'elseif n=="GE"then local b=' + prefix + 'po();local a2=' + prefix + 'po();' + prefix + 'pu(a2>=b)'
-      + 'elseif n=="NOT"then ' + prefix + 'pu(not ' + prefix + 'po())'
-      + 'elseif n=="NEG"then ' + prefix + 'pu(-' + prefix + 'po())'
-      + 'elseif n=="LEN"then ' + prefix + 'pu(#' + prefix + 'po())'
-      + 'elseif n=="JMP"then ' + prefix + 'pc=a'
-      + 'elseif n=="JZ"then local v=' + prefix + 'po();if not v then ' + prefix + 'pc=a end'
-      + 'elseif n=="JNZ"then local v=' + prefix + 'po();if v then ' + prefix + 'pc=a end'
-      + 'elseif n=="LOADK"then ' + prefix + 'pu(' + prefix + 'L[a])'
-      + 'elseif n=="STOREK"then ' + prefix + 'L[a]=' + prefix + 'po()'
-      + 'elseif n=="PRINT"then local v=' + prefix + 'po();print(v)'
-      + 'elseif n=="HALT"then break'
-      + 'else error("vm:badop")end end;';
-
-    return { code: runtime, opcodeCount: opEntries.length, instrCount: code.length };
+    return h;
   }
 
-  // -------- anti-tamper (soft-fail, executor-friendly) --------
-  function buildAntiTamper() {
-    // Extremely soft: never corrupts K on normal 3rd-party executors.
-    // Newline-separated for Delta compatibility.
-    var P = PREFIX;
-    var sm = P + 'sm';
-    var lines = [];
-    lines.push('local ' + sm + '=186');
-    lines.push('do local _=type if _ and _(print)~="function" then ' + sm + '=' + sm + '+0 end end');
-    lines.push('do if (1+2)*3~=9 then ' + sm + '=' + sm + '+0 end end');
-    lines.push('local _k0=' + (SALT | 0));
-    lines.push('local ' + P + 'K=(_k0+((' + sm + '>=160 and ' + sm + '<=260) and 0 or 0))%256');
-    return lines.join('\n') + '\n';
-  }
-
-  // -------- driver --------
-  T = tokenize(src);
-  SCOPES = [{}]; OUT = []; BRACE = 0; COUNTER = 0; PREV = '';
-  stats = {decls:0, renamed:0, str_enc:0, str_plain:0, num_mangled:0, env_enc:0};
-  var idents = {}, idre = /[A-Za-z_][A-Za-z0-9_]*/g, mm;
-  while ((mm = idre.exec(src)) !== null) idents[mm[0]] = 1;
-  var _alpha = 'abcdefghijklmnopqrstuvwxyz';
-  function _randPref(n) {
-    var s = '_', i;
-    for (i = 0; i < n; i++) s += _alpha.charAt(rnd(26));
-    return s;
-  }
-  PREFIX = _randPref(3);
-  var hasPre = true, kk, guard = 0;
-  while (hasPre && guard < 40) {
-    hasPre = false;
-    for (kk in idents) if (kk.substring(0, PREFIX.length) === PREFIX) { hasPre = true; break; }
-    if (hasPre) PREFIX = _randPref(3 + (guard >> 3));
-    guard++;
-  }
-  DEC = PREFIX + 'd';
-  var di = 0;
-  while (Object.prototype.hasOwnProperty.call(idents, DEC)) { di++; DEC = PREFIX + 'd' + di; }
-  POOLPFX = PREFIX + 'p';
-  // Randomized internal symbol names (no stable _E / _ch / D0 breadcrumbs)
-  function _rsym(n) {
-    var s = '_', i;
-    for (i = 0; i < n; i++) s += _alpha.charAt(rnd(26));
-    return s;
-  }
-  var ENVFN = _rsym(4 + rnd(3));   // was _E
-  var CHVAR = _rsym(3 + rnd(2));   // was _ch
-  var BXFN  = _rsym(3 + rnd(2));   // was PREFIXbx
-  var KEYFN = _rsym(3 + rnd(2));   // was PREFIXkey
-  var GREF  = _rsym(3 + rnd(2));   // cached getgenv table
-  STRIDX = 0; POOL = [];
-  POS = 0;
-  parseBlock([]);
-  if (POS !== T.length) fail('trailing top-level tokens');
-
-  // Render
-  var bodyToks = OUT.slice();
-  if (doCff) bodyToks = applyCFF(bodyToks, PREFIX, seed);
-  var body = render(bodyToks);
-
-  // Build pool prelude
-  var poolInfo = buildPoolCode(POOL, doDelayStr);
-
-  // ---- head ----
-  var head = '';
-  if (doAnti) {
-    head += buildAntiTamper();
-  } else {
-    head += 'local ' + PREFIX + 'K=' + SALT + ';';
-  }
-  if (doHideEnv) {
-    // Randomized resolver name; getgenv first (Delta hooks live there)
-    head += 'local function ' + ENVFN + '(n)\n'
-      + 'local g=getgenv and getgenv()\n'
-      + 'if type(g)=="table" and type(g[n])=="function" then return g[n] end\n'
-      + 'g=getrenv and getrenv()\n'
-      + 'if type(g)=="table" and type(g[n])=="function" then return g[n] end\n'
-      + 'if type(_G)=="table" and type(_G[n])=="function" then return _G[n] end\n'
-      + 'return nil\nend\n';
-  }
-  head += poolInfo.code;
-
-  // ---- bound stub (unchanged semantics) ----
-  if (bound) {
-    head += 'local ' + PREFIX + 'S=nil;'
+  // ---------- bound stub ----------
+  function boundSrc() {
+    if (!bound) return '';
+    var S = inm('B');
+    return 'local ' + S + '=nil;'
       + 'if getgenv==nil then return end;'
       + 'pcall(function()local c=string.char;local g=game;'
       + 'local P=g[c(80,108,97,99,101,73,100)];'
@@ -1440,112 +1971,82 @@ function obfuscate(src, seed, opts) {
       + 'if rt then ok=true;break end;'
       + 'task.wait(1) end;'
       + 'if not ok then return end;'
-      + PREFIX + 'S=1 end);'
-      + 'if ' + PREFIX + 'S==nil then return end;';
+      + S + '=1 end);'
+      + 'if ' + S + '==nil then return end;\n';
   }
 
-  // ---- junk (looks like real logic; never feeds live path) ----
-  var junk = '';
-  var junkCount = doJunk ? Math.floor((6 + rnd(8)) * (0.5 + density)) : 0;
-  function jsym() {
-    var s = '_', ji;
-    for (ji = 0; ji < 3 + rnd(2); ji++) s += _alpha.charAt(rnd(26));
-    return s;
-  }
-  for (var jnI = 0; jnI < junkCount; jnI++) {
-    var kind = rnd(6);
-    var a = jsym(), b = jsym(), c = jsym();
-    if (kind === 0) {
-      junk += 'do\nlocal ' + a + '={}\nlocal ' + b + '=0\nfor ' + c + '=1,' + (3 + rnd(5)) + ' do\n'
-        + a + '[' + c + ']=' + c + '*' + (1 + rnd(7)) + '\n' + b + '=' + b + '+' + a + '[' + c + ']\nend\nend\n';
-    } else if (kind === 1) {
-      junk += 'do\nlocal ' + a + '=0\nlocal ' + b + '="' + _alpha.charAt(rnd(26)) + _alpha.charAt(rnd(26)) + '"\n'
-        + 'if #' + b + '>0 then ' + a + '=#' + b + ' end\n' + a + '=' + a + '-#' + b + '\nend\n';
-    } else if (kind === 2) {
-      junk += 'do\nlocal ' + a + '=(function(' + b + ') return ' + b + ' end)(' + (1 + rnd(9)) + ')\n'
-        + 'local ' + c + '=' + a + '+' + (rnd(4)) + '-' + a + '\nend\n';
-    } else if (kind === 3) {
-      junk += 'do\nlocal ' + a + '={n=' + (10 + rnd(40)) + '}\n'
-        + 'if ' + a + '.n>0 and ' + a + '.n<' + (100 + rnd(50)) + ' then\n'
-        + 'local ' + b + '=' + a + '.n*0\nend\nend\n';
-    } else if (kind === 4) {
-      junk += 'do\nlocal ' + a + '=1\nwhile ' + a + '<1 do ' + a + '=' + a + '+1 end\nend\n';
-    } else {
-      junk += 'do\nlocal ' + a + '=select(1,' + (rnd(5)) + ')\n'
-        + 'local ' + b + '=type(' + a + ')=="number" and 0 or 0\nend\n';
+  // ---------- junk ----------
+  function junkSrc() {
+    if (!doJunk) return '';
+    var n = Math.floor((6 + rnd(8)) * (0.5 + density)), out = '', i, a, b, c, kind;
+    for (i = 0; i < n; i++) {
+      kind = rnd(5);
+      a = inm('J'); b = inm('J'); c = inm('J');
+      stats.junk++;
+      if (kind === 0) {
+        out += 'do local ' + a + '={} local ' + b + '=0 for ' + c + '=1,' + (3 + rnd(5)) + ' do '
+          + a + '[' + c + ']=' + c + '*' + (1 + rnd(7)) + ' ' + b + '=' + b + '+' + a + '[' + c + '] end end\n';
+      } else if (kind === 1) {
+        out += 'do local ' + a + '=("' + ALPHA_L.charAt(rnd(26)) + '"):rep(' + (1 + rnd(4)) + ') '
+          + 'if #' + a + '>0 then local ' + b + '=#' + a + ' end end\n';
+      } else if (kind === 2) {
+        out += 'do local ' + a + '=(function(' + b + ') return ' + b + ' end)(' + (1 + rnd(9)) + ') '
+          + 'local ' + c + '=' + a + '*0 end\n';
+      } else if (kind === 3) {
+        out += 'do local ' + a + '={n=' + (10 + rnd(40)) + '} if ' + a + '.n>0 then local ' + b + '=' + a + '.n*0 end end\n';
+      } else {
+        out += 'do local ' + a + '=1 while ' + a + '<1 do ' + a + '=' + a + '+1 end end\n';
+      }
     }
+    return out;
   }
 
-  // ---- decoys ----
+  // ---------- driver ----------
+  T = tokenize(src);
+  if (doVm) {
+    var vmRes = vmPass(T, rnd, idents);
+    T = vmRes.toks;
+    stats.vm = vmRes.compiled;
+    stats.vm_skips = vmRes.skips;
+  }
+  OUT = [];
+  parseBlock([]);
+  if (POS !== T.length) fail('trailing top-level tokens');
+
+  var bodyToks = doCff ? applyCFF(OUT) : OUT;
+  var body = render(bodyToks);
+
+  // decoys: random filler strings in the pool, referenced but never used
+  var nd = Math.min(50, Math.max(0, Math.floor(+opts.decoys) || 0));
+  var decoyStart = POOL.length, di, dj, dstr, cset = ALPHA_L + ALPHA_U + '0123456789';
+  for (di = 0; di < nd; di++) {
+    dstr = '';
+    for (dj = 0; dj < 40; dj++) dstr += cset.charAt(rnd(cset.length));
+    POOL.push(cryptBytes(utf8bytes(dstr)));
+  }
+  stats.decoys = nd;
+
+  pool = buildPool(POOL);
+
+  body = body.replace(new RegExp(POOLPFX + '(\\d+)', 'g'), function (m, n) {
+    return decodeCall(parseInt(n, 10));
+  });
+
   var decoyOut = '';
-  var ndecoy = Math.floor(+opts.decoys || 0);
-  if (ndecoy > 50) ndecoy = 50;
-  if (ndecoy > 0) {
-    var B64C = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-    var HEXC = '0123456789abcdef';
-    var DIGC = '0123456789';
-    function rstr(set, len) { var s = '', i; for (i = 0; i < len; i++) s += set.charAt(rnd(set.length)); return s; }
-    for (var di2 = 0; di2 < ndecoy; di2++) {
-      var fake = 'https://discord.com/api/webhooks/' + rstr(DIGC, 19) + '/' + rstr(B64C, 68);
-      var ck = cryptBytes(utf8bytes(fake));
-      POOL.push(ck);
-    }
-    poolInfo = buildPoolCode(POOL, doDelayStr);
-    head = '';
-    if (doAnti) head += buildAntiTamper(); else head += 'local ' + PREFIX + 'K=' + SALT + ';';
-    if (doHideEnv) head += 'local function ' + ENVFN + '(n)\n'
-      + 'local g=getgenv and getgenv()\n'
-      + 'if type(g)=="table" and type(g[n])=="function" then return g[n] end\n'
-      + 'g=getrenv and getrenv()\n'
-      + 'if type(g)=="table" and type(g[n])=="function" then return g[n] end\n'
-      + 'if type(_G)=="table" and type(_G[n])=="function" then return _G[n] end\n'
-      + 'return nil\nend\n';
-    head += poolInfo.code;
-    // decoy bodies use pool indices after the original count
-    var origPoolLen = POOL.length - ndecoy;
-    for (var ddI = 0; ddI < ndecoy; ddI++) {
-      decoyOut += 'local _x' + ddI + '=' + poolInfo.access(origPoolLen + ddI) + (doDelayStr ? '()()' : '()') + ';';
-    }
-  }
+  for (di = 0; di < nd; di++) decoyOut += 'do local _=' + decodeCall(decoyStart + di) + ' end;\n';
 
-  stats.decoys = ndecoy;
-  stats.junk = junkCount;
-  stats.opaque = stats.opaque || 0;
+  var head = headSrc(pool);
+  var code = head + boundSrc() + junkSrc() + decoyOut + body + '\n';
+
+  stats.pool = { real: POOL.length - nd, fake: nd, decoys: nd, env: envOrder.length };
+  stats.bound = !bound ? 'off' : (bindUser > 0 ? 'place+user' : 'place');
   stats.profile = profile;
   stats.density = density;
-  stats.vm = doVm;
-  stats.bound = !bound ? 'off' : (bindUser > 0 ? 'place+user' : 'place');
-  stats.pool = {real: POOL.length, fake: 0};
   stats.cff = doCff;
 
-  // Insert newlines between major sections so long pastes aren't one giant line
-  // (some executors silently truncate or fail on very long single lines)
-  var code = head + (junk ? '\n' + junk : '') + (decoyOut ? '\n' + decoyOut : '') + '\n' + body;
-  if (POOL.length > 0) {
-    code = code.replace(new RegExp(POOLPFX + '(\\d+)', 'g'), function (m, n) {
-      var call = poolInfo.access(parseInt(n, 10));
-      // delayStrings wraps the decrypted value in an extra function, so call twice
-      return doDelayStr ? (call + '()()') : (call + '()');
-    });
-  }
-  // Break up long semicolon-joined runs for executor paste limits
-  code = code.replace(/;(local )/g, ';\n$1');
-  code = code.replace(/;(do )/g, ';\n$1');
-
-  // ---- VM shell (opt-in) ----
-  if (doVm) {
-    var vm = buildVmShell(code, PREFIX, stats);
-    if (vm && vm.code) {
-      code = (doAnti ? buildAntiTamper() : 'local ' + PREFIX + 'K=' + SALT + ';') + vm.code;
-      stats.vm_bytes = vm.instrCount;
-      stats.vm_ops = vm.opcodeCount;
-    } else {
-      stats.vm_fallback = vm && vm.reason ? vm.reason : 'unsupported';
-    }
-  }
-
-  return { code: code + '\n', stats: stats };
+  return { code: code, stats: stats };
 }
 
+obfuscate.internals = { tokenize: tokenize, parseExpr: parseExprAt, emitExpr: emitExpr };
 return obfuscate;
 }));
