@@ -177,6 +177,11 @@ function createLive(opts) {
             id: rec.id, name: rec.name, sourceUrl: rec.sourceUrl, profile: rec.profile, vm: rec.vm,
             intervalMs: rec.intervalMs, ttlMs: rec.ttlMs, rotateEveryMs: rec.rotateEveryMs || 0,
             token: rec.token, tokenRotatedAt: rec.tokenRotatedAt || null, configVersion: rec.configVersion,
+            reference: {
+                key: rec.refKey, path: '/live/ref/' + rec.refKey, rotatedAt: rec.refRotatedAt || null,
+                accessCount: rec.refAccess ? rec.refAccess.count : 0, lastAccessAt: rec.refAccess ? rec.refAccess.lastAt : null
+            },
+            loaderState: !cur ? 'none' : (isExpired(cur) ? 'expired' : 'valid'),
             updatedAt: rec.updatedAt, status: status, running: rec.running,
             url: '/live/' + rec.id + '/latest',
             current: cur ? {
@@ -217,11 +222,28 @@ function createLive(opts) {
         Object.assign(rec, { name: cfg.name, sourceUrl: cfg.sourceUrl, profile: cfg.profile, vm: cfg.vm,
             intervalMs: cfg.intervalMs, ttlMs: cfg.ttlMs, rotateEveryMs: cfg.rotateEveryMs, updatedAt: at });
         if (changed) rec.configVersion += 1;
+        ensureReference(rec);
         db.scripts[rec.id] = rec;
         try { saveDb(); } catch (e) {
             if (!exists) delete db.scripts[rec.id];
             return { ok: false, status: 502, error: 'could not write config: ' + e.message };
         }
+        return { ok: true, script: publicView(rec) };
+    }
+
+    // Permanent loader reference: a random key that stays the same across builds and token
+    // rotations. Only rotateReference() changes it, which revokes the old loader at once.
+    function ensureReference(rec) {
+        if (!rec.refKey) rec.refKey = newId(20);
+        if (!rec.refAccess) rec.refAccess = { count: 0, lastAt: null };
+    }
+    function rotateReference(id) {
+        const rec = db.scripts[id];
+        if (!rec) return { ok: false, status: 404, error: 'no such script' };
+        const prev = rec.refKey;
+        rec.refKey = newId(20);
+        rec.refRotatedAt = new Date(now()).toISOString();
+        try { saveDb(); } catch (e) { rec.refKey = prev; return { ok: false, status: 502, error: 'could not save' }; }
         return { ok: true, script: publicView(rec) };
     }
 
@@ -441,11 +463,7 @@ function createLive(opts) {
 
     // ---- delivery ----------------------------------------------------------
     // Returns { status, body? }. Token is compared in constant time.
-    function getLatest(id, token) {
-        const rec = db.scripts[id];
-        if (!rec) return { status: 404 };
-        const previousOk = !!rec.previousToken && now() < (rec.previousTokenExp || 0) && tokenOk(token, rec.previousToken);
-        if (!tokenOk(token, rec.token) && !previousOk) return { status: 401 };
+    function deliverCurrent(id, rec) {
         const cur = currentGen(rec);
         if (!cur) return { status: 404, error: 'no build yet' };
         if (isExpired(cur)) return { status: 410, error: 'artifact expired' };
@@ -456,14 +474,45 @@ function createLive(opts) {
         }
     }
 
+    function getLatest(id, token) {
+        const rec = db.scripts[id];
+        if (!rec) return { status: 404 };
+        const previousOk = !!rec.previousToken && now() < (rec.previousTokenExp || 0) && tokenOk(token, rec.previousToken);
+        if (!tokenOk(token, rec.token) && !previousOk) return { status: 401 };
+        return deliverCurrent(id, rec);
+    }
+
+    // The permanent loader path. Resolves the stable key to whatever generation is current.
+    // Unknown and revoked keys both return 404, so a probe cannot tell them apart.
+    let refSavedAt = 0;
+    function resolveReference(key) {
+        if (typeof key !== 'string' || key.length < 20) return { status: 404 };
+        const id = Object.keys(db.scripts).find(k => tokenOk(key, db.scripts[k].refKey));
+        if (!id) return { status: 404 };
+        const rec = db.scripts[id];
+        const out = deliverCurrent(id, rec);
+        if (out.status === 200) {
+            ensureReference(rec);
+            rec.refAccess.count += 1;
+            rec.refAccess.lastAt = new Date(now()).toISOString();
+            // Persist counters at most once a minute; they are diagnostic, not security state.
+            if (now() - refSavedAt > 60 * 1000) { refSavedAt = now(); try { saveDb(); } catch (e) { /* retry later */ } }
+        }
+        return out;
+    }
+
     // ---- boot --------------------------------------------------------------
+    let migrated = false;
+    Object.keys(db.scripts).forEach(id => { const before = db.scripts[id].refKey; ensureReference(db.scripts[id]); if (before !== db.scripts[id].refKey) migrated = true; });
+    if (migrated) { try { saveDb(); } catch (e) { /* retried on the next save */ } }
+
     const cleanupTimer = setInterval(cleanup, CLEANUP_MS);
     if (cleanupTimer.unref) cleanupTimer.unref();
     resumeSessions();
 
     return {
-        list, get, save, remove, rotateToken, buildOnce, startSession, stopSession,
-        getLatest, cleanup, tick, resumeSessions,
+        list, get, save, remove, rotateToken, rotateReference, buildOnce, startSession, stopSession,
+        getLatest, resolveReference, cleanup, tick, resumeSessions,
         _state: () => db,
         _stop: () => { clearInterval(cleanupTimer); rt.forEach(r => { if (r.timer) cancelSchedule(r.timer); }); }
     };
@@ -503,6 +552,18 @@ function mountLiveRoutes(app, live, requireAdmin) {
         const r = live.rotateToken(req.params.id);
         if (!r.ok) return res.status(r.status).json({ error: r.error });
         res.json(r);
+    });
+    app.post(A + '/:id/rotate-reference', requireAdmin, (req, res) => {
+        const r = live.rotateReference(req.params.id);
+        if (!r.ok) return res.status(r.status).json({ error: r.error });
+        res.json(r);
+    });
+    app.get('/live/ref/:key', (req, res) => {
+        const r = live.resolveReference(String(req.params.key || ''));
+        res.set('Cache-Control', 'no-store');
+        res.set('X-Content-Type-Options', 'nosniff');
+        if (r.status !== 200) return res.status(r.status).type('text/plain').send(r.error || 'not found');
+        res.type('text/plain; charset=utf-8').send(r.body);
     });
     app.get('/live/:id/latest', (req, res) => {
         const r = live.getLatest(req.params.id, String(req.query.token || ''));
