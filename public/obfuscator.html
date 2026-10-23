@@ -538,7 +538,7 @@
 .live-field.wide{grid-column:1/-1}
 .live-field input,.live-field select{width:100%;min-width:0;box-sizing:border-box}
 .live-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
-.live-link{word-break:break-all;font-family:var(--font-mono);font-size:11px}
+.live-link{word-break:break-all;white-space:pre-line;font-family:var(--font-mono);font-size:11px}
 </style>
 </head>
 <body>
@@ -1119,6 +1119,10 @@
   var liveScripts = [];
   var liveTimer = null;
   function liveMsg(t, isErr) { $('liveMsg').textContent = t || ''; $('liveMsg').style.color = isErr ? '#c0392b' : ''; }
+  function statsText(st) {
+    if (!st) return '';
+    return Object.keys(st).slice(0, 5).map(function (k) { return k + ' ' + st[k]; }).join(', ');
+  }
   function deliveryUrl(sc) { return location.origin + sc.url + '?token=' + sc.token; }
   function fmtTime(ms) { return ms ? new Date(ms).toLocaleString() : '\u2014'; }
   function cell(tr, text, cls) { var td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; tr.appendChild(td); }
@@ -1138,7 +1142,7 @@
         var cur = sc.current;
         cell(tr, sc.name);
         cell(tr, sc.status + (sc.overlapSkips ? ' (overlaps ' + sc.overlapSkips + ')' : ''));
-        cell(tr, cur ? (cur.id + (cur.expired ? ' (expired)' : '')) : 'none yet');
+        cell(tr, cur ? (cur.id + (cur.expired ? ' (expired)' : '') + '  ' + statsText(cur.stats)) : 'none yet');
         cell(tr, deliveryUrl(sc), 'live-link');
         cell(tr, cur ? fmtTime(cur.expiresAt) : '\u2014');
         cell(tr, fmtTime(sc.lastSuccessAt));
@@ -1163,6 +1167,7 @@
     return call('GET', '/admin/api/live').then(function (res) {
       if (!res.ok) { liveMsg(errText(res), true); return; }
       liveScripts = res.data.scripts || [];
+      if (!selected() && liveScripts.length) liveCurrentId = liveScripts[0].id;   // always show a script's link
       renderLive();
       fillForm();
     });
@@ -1175,7 +1180,10 @@
     var sc = selected();
     if (!sc) return;
     $('liveDetail').textContent = 'Delivery: ' + deliveryUrl(sc) +
-      (sc.rotateEveryMs ? '   (rotates every ' + Math.round(sc.rotateEveryMs / 1000) + ' s, last rotated ' + fmtTime(sc.tokenRotatedAt ? Date.parse(sc.tokenRotatedAt) : 0) + ')' : '');
+      (sc.rotateEveryMs
+        ? '\nRotates every ' + Math.round(sc.rotateEveryMs / 1000) + ' s. Last rotated ' + fmtTime(sc.tokenRotatedAt ? Date.parse(sc.tokenRotatedAt) : 0) +
+          '. Next rotation ' + (sc.nextRotationAt ? fmtTime(sc.nextRotationAt) : 'not scheduled (VM stopped)') + '.'
+        : '\nRotation is off for this script.');
   }
   function formBody() {
     return {
