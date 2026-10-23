@@ -1083,7 +1083,7 @@ function vmPass(T, rnd, idents) {
     i++;
   }
 
-  if (!fns.length) return { toks: T, compiled: 0, skips: skips };
+  if (!fns.length) return { toks: T, pre: [], compiled: 0, skips: skips };
 
   // per-build opcode permutation
   for (q = 0; q < VM_OPS.length; q++) perm.push(q + 1);
@@ -1114,7 +1114,7 @@ function vmPass(T, rnd, idents) {
   pre = pre.concat(tokenize('local ' + nm.k + ' = function(...) return {n = select("#", ...), ...} end'));
   pre = pre.concat(tokenize('local ' + nm.v + ' = function(np, ...) return {n = math.max(select("#", ...) - np, 0), select(np + 1, ...)} end'));
   pre = pre.concat(tokenize(vmInterp(ids, nm)));
-  return { toks: pre.concat(out), compiled: fns.length, skips: skips };
+  return { toks: out, pre: pre, compiled: fns.length, skips: skips };
 }
 
 // ---------- main ----------
@@ -2007,18 +2007,30 @@ function obfuscate(src, seed, opts) {
   }
 
   // ---------- driver ----------
-  T = tokenize(src);
+  var srcToks = tokenize(src), vmPre = [];
   if (doVm) {
-    var vmRes = vmPass(T, rnd, idents);
-    T = vmRes.toks;
+    var vmRes = vmPass(srcToks, rnd, idents);
+    srcToks = vmRes.toks;
+    vmPre = vmRes.pre || [];
     stats.vm = vmRes.compiled;
     stats.vm_skips = vmRes.skips;
   }
+  // Preamble (VM tables and helpers) is parsed first and placed in the outer scope;
+  // the program is parsed second and placed in the inner scope. The parser's scope
+  // stack persists across the two passes, so program references still resolve.
   OUT = [];
+  T = vmPre; POS = 0;
+  if (vmPre.length) { parseBlock([]); if (POS !== T.length) fail('trailing vm preamble tokens'); }
+  var outerOut = OUT;
+  OUT = [];
+  T = srcToks; POS = 0;
   parseBlock([]);
   if (POS !== T.length) fail('trailing top-level tokens');
+  var innerOut = OUT;
 
-  var bodyToks = doCff ? applyCFF(OUT) : OUT;
+  var outerToks = doCff ? applyCFF(outerOut) : outerOut;
+  var bodyToks = doCff ? applyCFF(innerOut) : innerOut;
+  var preText = render(outerToks);
   var body = render(bodyToks);
 
   // decoys: random filler strings in the pool, referenced but never used
@@ -2033,15 +2045,19 @@ function obfuscate(src, seed, opts) {
 
   pool = buildPool(POOL);
 
-  body = body.replace(new RegExp(POOLPFX + '(\\d+)', 'g'), function (m, n) {
-    return decodeCall(parseInt(n, 10));
-  });
+  var poolRe = new RegExp(POOLPFX + '(\\d+)', 'g');
+  var poolSub = function (m, n) { return decodeCall(parseInt(n, 10)); };
+  body = body.replace(poolRe, poolSub);
+  preText = preText.replace(poolRe, poolSub);
 
   var decoyOut = '';
   for (di = 0; di < nd; di++) decoyOut += 'do local _=' + decodeCall(decoyStart + di) + ' end;\n';
 
   var head = headSrc(pool);
-  var code = head + boundSrc() + junkSrc() + decoyOut + body + '\n';
+  // Two scopes: engine helpers live in an outer function, the program in an inner one,
+  // so each stays under Luau's 200-active-local limit per function.
+  var code = 'return (function(...)\n' + head + boundSrc() + junkSrc() + decoyOut + preText + '\n'
+    + 'return (function(...)\n' + body + '\nend)(...)\nend)(...)\n';
 
   stats.pool = { real: POOL.length - nd, fake: nd, decoys: nd, env: envOrder.length };
   stats.bound = !bound ? 'off' : (bindUser > 0 ? 'place+user' : 'place');
