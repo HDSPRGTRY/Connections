@@ -625,11 +625,11 @@
           <label class="live-field">Check interval (ms, min 6000)
             <input type="number" id="liveInterval" min="6000" step="1000" value="6000">
           </label>
-          <label class="live-field">Artifact lifetime (hours)
-            <input type="number" id="liveTtl" min="1" step="1" value="24">
+          <label class="live-field">Artifact lifetime (hours, 0 = open)
+            <input type="number" id="liveTtl" min="0" step="1" value="24">
           </label>
-          <label class="live-field">Rotate link every (seconds, 0 = never, min 6)
-            <input type="number" id="liveRotSec" min="0" step="1" value="0">
+          <label class="live-field">Rotate link every (seconds, 0 = never, min 1)
+            <input type="number" id="liveRotSec" min="1" step="1" value="0">
           </label>
           <label class="live-field">VM layer
             <span><input type="checkbox" id="liveVm" checked> enabled</span>
