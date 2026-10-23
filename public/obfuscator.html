@@ -540,6 +540,10 @@
 .live-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
 .live-link{word-break:break-all;white-space:pre-line;font-family:var(--font-mono);font-size:11px}
 .live-loader{display:flex;flex-direction:column;gap:10px;margin-top:10px;padding:12px;border:1px solid rgba(128,128,128,.3);border-radius:6px}
+.src-fetch{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+.src-fetch[hidden]{display:none}
+.src-fetch input{flex:1;min-width:180px;box-sizing:border-box}
+.src-fetch .field-hint{flex-basis:100%}
 .loader-code{width:100%;box-sizing:border-box;font-family:var(--font-mono);font-size:12px;resize:vertical;min-height:48px}
 </style>
 </head>
@@ -766,6 +770,11 @@
                 <svg class="icon" viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
               </button>
             </div>
+          </div>
+          <div class="src-fetch" id="srcFetch" hidden>
+            <input type="text" id="srcUrl" placeholder="Raw link to fetch (admin sign-in required)" spellcheck="false">
+            <button type="button" id="srcFetchBtn">Fetch link</button>
+            <div class="field-hint" id="srcFetchMsg"></div>
           </div>
           <textarea id="src" placeholder="Paste Lua/Luau source here, or choose a file above&hellip;" spellcheck="false"></textarea>
         </div>
@@ -1289,6 +1298,29 @@
       liveCurrentId = ''; $('liveSelect').value = ''; liveMsg('deleted'); return liveLoad();
     });
   }));
+  // Fetch the source on the server (same route as the admin Raw paste box) and load it into the
+  // source box. Reports underscore and asterisk counts so a damaged copy is visible at once.
+  function srcMsg(text, isErr) { $('srcFetchMsg').textContent = text || ''; $('srcFetchMsg').style.color = isErr ? '#c0392b' : ''; }
+  $('srcFetchBtn').addEventListener('click', function () {
+    var url = $('srcUrl').value.trim();
+    if (!url) { srcMsg('enter a link first', true); return; }
+    srcMsg('fetching...');
+    call('POST', '/admin/api/fetch', { url: url }).then(function (res) {
+      if (res.status === 401) { srcMsg('sign in to the admin panel first (open the page with #admin and enter your key)', true); return; }
+      if (!res.ok) { srcMsg((res.data && res.data.error) || ('fetch failed (' + res.status + ')'), true); return; }
+      var text = res.data.text || '';
+      $('src').value = text;
+      $('src').dispatchEvent(new Event('input'));
+      var unders = (text.match(/_/g) || []).length;
+      var stars = (text.match(/\*/g) || []).length;
+      var damaged = /\bfor\s*,/.test(text) || /\bfor\s+=/.test(text);
+      var note = 'loaded ' + text.length + ' characters (HTTP ' + res.data.status + '), underscores: ' + unders + ', asterisks: ' + stars + '.';
+      if (damaged) note += ' WARNING: loop variables are missing their names, so this link returned altered text. Check the raw link.';
+      else if (unders === 0 && stars === 0 && text.length > 0) note += ' No underscores or asterisks at all: check the link if your script uses them.';
+      srcMsg(note, damaged);
+    }).catch(function () { srcMsg('server unreachable', true); });
+  });
+
   $('loaderCopy').addEventListener('click', function () {
     var box = $('loaderCode');
     if (!box.value) return;
@@ -1325,6 +1357,7 @@
   }
   function enterPanel() {
     showPanel();
+    $('srcFetch').hidden = false;
     $('adminSignOut').hidden = false;
     call('GET', '/admin/api/entries').then(function (res) {
       if (res.ok) renderList(res.data.entries || []);
@@ -1337,14 +1370,18 @@
     $('adminLock').hidden = false;
     $('adminState').textContent = 'locked';
     $('adminSignOut').hidden = true;
+    $('srcFetch').hidden = true;
     setMsg(message || '');
   }
   // Return visits: if the browser already has a valid admin cookie, open the panel directly.
   function checkSession() {
-    if (location.hash !== '#admin') return;
     fetch('/admin/api/session', { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.ok) enterPanel(); })
+      .then(function (d) {
+        if (!d || !d.ok) return;
+        $('srcFetch').hidden = false;
+        if (location.hash === '#admin') enterPanel();
+      })
       .catch(function () { /* stay locked */ });
   }
   $('adminSignOut').addEventListener('click', function () {
