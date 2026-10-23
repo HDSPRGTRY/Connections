@@ -68,6 +68,13 @@ function checkSource(internals, src) {
     return true;
 }
 
+// Keep only plain numeric counters from the engine's stats (for the dashboard).
+function summarizeStats(st) {
+    const o = {};
+    if (st && typeof st === 'object') Object.keys(st).forEach(k => { if (typeof st[k] === 'number') o[k] = st[k]; });
+    return o;
+}
+
 function validateConfig(input, prev) {
     const c = input || {};
     const errors = [];
@@ -147,7 +154,7 @@ function createLive(opts) {
     const rt = new Map();
     function rtOf(id) {
         if (!rt.has(id)) rt.set(id, { timer: null, building: false, cancelled: false, running: false,
-            lastError: null, lastBuildMs: null, lastFetchMs: null, nextAt: null,
+            lastError: null, lastBuildMs: null, lastFetchMs: null, nextAt: null, nextRotAt: null,
             overlapSkips: 0, lastTickAt: null, lastSuccessAt: null, tickCount: 0, epoch: 0 });
         return rt.get(id);
     }
@@ -175,8 +182,9 @@ function createLive(opts) {
             current: cur ? {
                 id: cur.id, createdAt: cur.createdAt, expiresAt: cur.expiresAt, expired: isExpired(cur),
                 sourceHash: cur.sourceHash.slice(0, 12), obfuscatorVersion: cur.obfuscatorVersion,
-                bytes: cur.bytes, seed: cur.seed
+                bytes: cur.bytes, seed: cur.seed, stats: cur.stats || {}
             } : null,
+            nextRotationAt: r.running && rec.rotateEveryMs ? r.nextRotAt : null,
             lastSuccessAt: r.lastSuccessAt, lastError: r.lastError, lastBuildMs: r.lastBuildMs,
             lastFetchMs: r.lastFetchMs, nextAt: r.running ? r.nextAt : null, overlapSkips: r.overlapSkips,
             generations: rec.generations.slice(-LIMITS.maxGenerations).map(g => ({
@@ -278,7 +286,8 @@ function createLive(opts) {
             const gen = {
                 id: newId(8), seq: rec.nextSeq, createdAt: new Date(now()).toISOString(),
                 expiresAt: now() + rec.ttlMs, sourceHash: sha256(src), settingsHash: sha256(JSON.stringify(settings)),
-                key: key, obfuscatorVersion: engineVersion, bytes: Buffer.byteLength(code, 'utf8'), seed: seed
+                key: key, obfuscatorVersion: engineVersion, bytes: Buffer.byteLength(code, 'utf8'), seed: seed,
+                stats: summarizeStats(out.stats)
             };
             const file = artPath(id, gen.id);
             // 1) write the new artifact  2) swap the pointer  3) persist.  If 3 fails, roll back.
@@ -335,12 +344,16 @@ function createLive(opts) {
         const rec = db.scripts[id];
         if (!rec || !rec.running || !rec.rotateEveryMs) return;
         rotateTokenNow(rec);
+        r.nextRotAt = now() + rec.rotateEveryMs;
         r.rotTimer = schedule(() => rotationLoop(id, epoch), rec.rotateEveryMs);
     }
     function armRotation(id, epoch) {
         const rec = db.scripts[id];
         const r = rtOf(id);
-        if (rec && rec.rotateEveryMs) r.rotTimer = schedule(() => rotationLoop(id, epoch), rec.rotateEveryMs);
+        if (rec && rec.rotateEveryMs) {
+            r.nextRotAt = now() + rec.rotateEveryMs;
+            r.rotTimer = schedule(() => rotationLoop(id, epoch), rec.rotateEveryMs);
+        }
     }
 
     // ---- sessions ----------------------------------------------------------
@@ -384,6 +397,7 @@ function createLive(opts) {
         const r = rtOf(id);
         if (r.timer) { cancelSchedule(r.timer); r.timer = null; }
         if (r.rotTimer) { cancelSchedule(r.rotTimer); r.rotTimer = null; }
+        r.nextRotAt = null;
         r.epoch += 1;                       // invalidates the running tick chain
         r.cancelled = true;                 // discards an in-flight build before publish
         r.nextAt = null;
