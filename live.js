@@ -14,7 +14,7 @@ const LIMITS = {
     minIntervalMs: 6000,        // spec target: 6 s
     maxIntervalMs: 60 * 60 * 1000,
     minTtlMs: 60 * 1000,
-    minRotateMs: 6000,          // token rotation: 0 = off, otherwise 6 s to 24 h
+    minRotateMs: 1000,          // token rotation: 0 = off, otherwise 1 s to 24 h
     maxRotateMs: 24 * 60 * 60 * 1000,
     maxTtlMs: 7 * 24 * 60 * 60 * 1000,
     maxOutputBytes: 8 * 1024 * 1024,
@@ -24,6 +24,16 @@ const CLEANUP_MS = 60 * 1000;
 
 function sha256(s) { return crypto.createHash('sha256').update(s, 'utf8').digest('hex'); }
 function newId(n) { return crypto.randomBytes(n || 6).toString('hex'); }
+
+// Decoys: 20 to 80 strings per build, shaped exactly like the rotating link
+// (/live/<id>/latest?token=<token>). Fresh on every build, so they never repeat.
+const DECOY_MIN = 20, DECOY_MAX = 80;
+function makeDecoys() {
+    const n = DECOY_MIN + crypto.randomInt(DECOY_MAX - DECOY_MIN + 1);
+    const strings = [];
+    for (let i = 0; i < n; i++) strings.push('/live/' + newId(6) + '/latest?token=' + newId(24));
+    return { count: n, strings: strings };
+}
 function tokenOk(given, expected) {
     if (typeof given !== 'string' || typeof expected !== 'string' || !given || !expected) return false;
     const a = Buffer.from(given, 'utf8'), b = Buffer.from(expected, 'utf8');
@@ -94,8 +104,9 @@ function validateConfig(input, prev) {
     }
     if (c.ttlMs !== undefined) out.ttlMs = Number(c.ttlMs);
     if (out.ttlMs === undefined) out.ttlMs = 24 * 60 * 60 * 1000;
-    if (!Number.isFinite(out.ttlMs) || out.ttlMs < LIMITS.minTtlMs || out.ttlMs > LIMITS.maxTtlMs) {
-        errors.push('ttlMs must be between ' + LIMITS.minTtlMs + ' and ' + LIMITS.maxTtlMs);
+    // 0 = open: artifacts never expire.
+    if (!Number.isFinite(out.ttlMs) || (out.ttlMs !== 0 && (out.ttlMs < LIMITS.minTtlMs || out.ttlMs > LIMITS.maxTtlMs))) {
+        errors.push('ttlMs must be 0 (open) or between ' + LIMITS.minTtlMs + ' and ' + LIMITS.maxTtlMs);
     }
     if (c.rotateEveryMs !== undefined) out.rotateEveryMs = Number(c.rotateEveryMs);
     if (out.rotateEveryMs === undefined) out.rotateEveryMs = 0;
@@ -138,6 +149,30 @@ function createLive(opts) {
         const tmp = stateFile + '.' + newId(4) + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
         fs.renameSync(tmp, stateFile);   // atomic replace on POSIX
+        queueRemoteSave();
+    }
+
+    // Optional remote copy (e.g. a private Pastefy paste) so state survives a redeploy
+    // that wipes the disk. Saves are debounced. Until hydrate() has read the remote
+    // copy successfully, nothing is written to it, so an outage cannot erase state.
+    const remote = opts.remote || null;   // { load(): obj|null (throws on outage), save(obj): bool }
+    let remoteReady = false, remoteTimer = null, remoteBusy = false;
+    function queueRemoteSave(delay) {
+        if (!remote || !remoteReady || remoteTimer) return;
+        remoteTimer = setTimeout(async () => {
+            remoteTimer = null;
+            if (remoteBusy) { queueRemoteSave(1000); return; }
+            remoteBusy = true;
+            try {
+                const snapshot = JSON.parse(JSON.stringify(db));   // plain object; remote does its own encoding
+                const ok = await remote.save(snapshot);
+                if (!ok) throw new Error('storage refused the save');
+            } catch (e) {
+                log('[live] remote save failed, retrying in 10 s: ' + (e && e.message));
+                queueRemoteSave(10000);
+            } finally { remoteBusy = false; }
+        }, delay === undefined ? 1500 : delay);
+        if (remoteTimer.unref) remoteTimer.unref();
     }
     function artPath(scriptId, genId) { return path.join(artDir, scriptId, genId + '.lua'); }
     function writeArtifact(file, text) {
@@ -161,7 +196,11 @@ function createLive(opts) {
     function currentGen(rec) {
         return rec.generations.find(g => g.id === rec.currentGen) || null;
     }
-    function isExpired(gen) { return !gen || now() >= gen.expiresAt; }
+    function isExpired(gen) {
+        if (!gen) return true;
+        if (gen.expiresAt === null) return false;   // open: never expires
+        return now() >= gen.expiresAt;
+    }
 
     // ---- config API --------------------------------------------------------
     function publicView(rec) {
@@ -299,7 +338,8 @@ function createLive(opts) {
 
             checkSource(internals, src);
             const seed = crypto.randomInt(1, 2147483647);
-            const out = obfuscate(src, seed, settings);
+            const decoys = makeDecoys();
+            const out = obfuscate(src, seed, Object.assign({}, settings, { decoys: decoys.count, decoyStrings: decoys.strings }));
             if (r.cancelled) return { ok: false, status: 409, error: 'cancelled' };
             const code = out && out.code;
             validateOutput(internals, code);
@@ -307,7 +347,7 @@ function createLive(opts) {
             if (!db.scripts[id]) return { ok: false, status: 404, error: 'script was deleted during build' };
             const gen = {
                 id: newId(8), seq: rec.nextSeq, createdAt: new Date(now()).toISOString(),
-                expiresAt: now() + rec.ttlMs, sourceHash: sha256(src), settingsHash: sha256(JSON.stringify(settings)),
+                expiresAt: rec.ttlMs === 0 ? null : now() + rec.ttlMs, sourceHash: sha256(src), settingsHash: sha256(JSON.stringify(settings)),
                 key: key, obfuscatorVersion: engineVersion, bytes: Buffer.byteLength(code, 'utf8'), seed: seed,
                 stats: summarizeStats(out.stats)
             };
@@ -346,6 +386,11 @@ function createLive(opts) {
         } finally {
             r.building = false;
             r.lastBuildMs = now() - t0;
+            if (r.rebuildPending) {
+                r.rebuildPending = false;
+                const again = db.scripts[id];
+                if (again && again.running && again.rotateEveryMs) schedule(() => requestRebuild(id), 0);
+            }
         }
     }
 
@@ -359,6 +404,15 @@ function createLive(opts) {
         rec.tokenRotatedAt = new Date(now()).toISOString();
         try { saveDb(); } catch (e) { log('[live] could not save rotated token: ' + e.message); }
     }
+    // Every rotation rebuilds the artifact, so the permanent link's content moves with the
+    // rotating link (new seed, new decoys). Requests that arrive during a build are
+    // coalesced into one follow-up build; the permanent link keeps serving the last
+    // completed generation until the new one is validated and published.
+    function requestRebuild(id) {
+        const r = rtOf(id);
+        if (r.building) { r.rebuildPending = true; return; }
+        buildOnce(id, 'rotate').catch(() => {});
+    }
     function rotationLoop(id, epoch) {
         const r = rtOf(id);
         if (r.epoch !== epoch) return;
@@ -366,6 +420,7 @@ function createLive(opts) {
         const rec = db.scripts[id];
         if (!rec || !rec.running || !rec.rotateEveryMs) return;
         rotateTokenNow(rec);
+        requestRebuild(id);
         r.nextRotAt = now() + rec.rotateEveryMs;
         r.rotTimer = schedule(() => rotationLoop(id, epoch), rec.rotateEveryMs);
     }
@@ -420,6 +475,7 @@ function createLive(opts) {
         if (r.timer) { cancelSchedule(r.timer); r.timer = null; }
         if (r.rotTimer) { cancelSchedule(r.rotTimer); r.rotTimer = null; }
         r.nextRotAt = null;
+        r.rebuildPending = false;
         r.epoch += 1;                       // invalidates the running tick chain
         r.cancelled = true;                 // discards an in-flight build before publish
         r.nextAt = null;
@@ -501,6 +557,38 @@ function createLive(opts) {
         return out;
     }
 
+    // Restores state from the remote copy (if any), then resumes sessions and rebuilds any
+    // current artifact whose file is missing (the disk is wiped on redeploy). Call once
+    // at startup, before serving requests.
+    function stopAllTimers() {
+        rt.forEach((r) => {
+            if (r.timer) cancelSchedule(r.timer);
+            if (r.rotTimer) cancelSchedule(r.rotTimer);
+            r.timer = null; r.rotTimer = null; r.cancelled = true; r.epoch += 1;
+        });
+    }
+    async function hydrate() {
+        let loaded = null, loadOk = !remote;
+        if (remote) {
+            try { loaded = await remote.load(); loadOk = true; }
+            catch (e) { log('[live] remote state unavailable, using local state; remote saves paused: ' + (e && e.message)); }
+        }
+        stopAllTimers();
+        if (loadOk && loaded && typeof loaded === 'object' && loaded.scripts && typeof loaded.scripts === 'object') db = loaded;
+        Object.keys(db.scripts).forEach(id => ensureReference(db.scripts[id]));
+        try { saveDb(); } catch (e) { log('[live] local save failed: ' + e.message); }
+        remoteReady = !!remote && loadOk;
+        if (remoteReady) queueRemoteSave(0);
+        resumeSessions();
+        for (const id of Object.keys(db.scripts)) {
+            const cur = currentGen(db.scripts[id]);
+            if (cur && !fs.existsSync(artPath(id, cur.id)) && !rtOf(id).building) {
+                await buildOnce(id, 'restore');
+            }
+        }
+        return { scripts: Object.keys(db.scripts).length, remote: remoteReady };
+    }
+
     // ---- boot --------------------------------------------------------------
     let migrated = false;
     Object.keys(db.scripts).forEach(id => { const before = db.scripts[id].refKey; ensureReference(db.scripts[id]); if (before !== db.scripts[id].refKey) migrated = true; });
@@ -511,7 +599,7 @@ function createLive(opts) {
     resumeSessions();
 
     return {
-        list, get, save, remove, rotateToken, rotateReference, buildOnce, startSession, stopSession,
+        list, get, save, remove, rotateToken, rotateReference, buildOnce, startSession, stopSession, hydrate,
         getLatest, resolveReference, cleanup, tick, resumeSessions,
         _state: () => db,
         _stop: () => { clearInterval(cleanupTimer); rt.forEach(r => { if (r.timer) cancelSchedule(r.timer); }); }
