@@ -14,6 +14,8 @@ const LIMITS = {
     minIntervalMs: 6000,        // spec target: 6 s
     maxIntervalMs: 60 * 60 * 1000,
     minTtlMs: 60 * 1000,
+    minRotateMs: 6000,          // token rotation: 0 = off, otherwise 6 s to 24 h
+    maxRotateMs: 24 * 60 * 60 * 1000,
     maxTtlMs: 7 * 24 * 60 * 60 * 1000,
     maxOutputBytes: 8 * 1024 * 1024,
     maxNameLen: 60
@@ -88,6 +90,11 @@ function validateConfig(input, prev) {
     if (!Number.isFinite(out.ttlMs) || out.ttlMs < LIMITS.minTtlMs || out.ttlMs > LIMITS.maxTtlMs) {
         errors.push('ttlMs must be between ' + LIMITS.minTtlMs + ' and ' + LIMITS.maxTtlMs);
     }
+    if (c.rotateEveryMs !== undefined) out.rotateEveryMs = Number(c.rotateEveryMs);
+    if (out.rotateEveryMs === undefined) out.rotateEveryMs = 0;
+    if (out.rotateEveryMs !== 0 && (!Number.isFinite(out.rotateEveryMs) || out.rotateEveryMs < LIMITS.minRotateMs || out.rotateEveryMs > LIMITS.maxRotateMs)) {
+        errors.push('rotateEveryMs must be 0 (off) or between ' + LIMITS.minRotateMs + ' and ' + LIMITS.maxRotateMs);
+    }
     return { config: out, errors: errors };
 }
 
@@ -161,7 +168,8 @@ function createLive(opts) {
         else status = 'Running';
         return {
             id: rec.id, name: rec.name, sourceUrl: rec.sourceUrl, profile: rec.profile, vm: rec.vm,
-            intervalMs: rec.intervalMs, ttlMs: rec.ttlMs, token: rec.token, configVersion: rec.configVersion,
+            intervalMs: rec.intervalMs, ttlMs: rec.ttlMs, rotateEveryMs: rec.rotateEveryMs || 0,
+            token: rec.token, tokenRotatedAt: rec.tokenRotatedAt || null, configVersion: rec.configVersion,
             updatedAt: rec.updatedAt, status: status, running: rec.running,
             url: '/live/' + rec.id + '/latest',
             current: cur ? {
@@ -199,7 +207,7 @@ function createLive(opts) {
             currentGen: null, nextSeq: 1, configVersion: 0
         };
         Object.assign(rec, { name: cfg.name, sourceUrl: cfg.sourceUrl, profile: cfg.profile, vm: cfg.vm,
-            intervalMs: cfg.intervalMs, ttlMs: cfg.ttlMs, updatedAt: at });
+            intervalMs: cfg.intervalMs, ttlMs: cfg.ttlMs, rotateEveryMs: cfg.rotateEveryMs, updatedAt: at });
         if (changed) rec.configVersion += 1;
         db.scripts[rec.id] = rec;
         try { saveDb(); } catch (e) {
@@ -310,6 +318,31 @@ function createLive(opts) {
         }
     }
 
+    // ---- token rotation ----------------------------------------------------
+    // Automatic rotation (only while a session runs). The previous token stays valid for
+    // one rotation interval, so a request that started just before a change still works.
+    function rotateTokenNow(rec) {
+        rec.previousToken = rec.token;
+        rec.previousTokenExp = now() + (rec.rotateEveryMs || LIMITS.minRotateMs);
+        rec.token = newId(24);
+        rec.tokenRotatedAt = new Date(now()).toISOString();
+        try { saveDb(); } catch (e) { log('[live] could not save rotated token: ' + e.message); }
+    }
+    function rotationLoop(id, epoch) {
+        const r = rtOf(id);
+        if (r.epoch !== epoch) return;
+        r.rotTimer = null;
+        const rec = db.scripts[id];
+        if (!rec || !rec.running || !rec.rotateEveryMs) return;
+        rotateTokenNow(rec);
+        r.rotTimer = schedule(() => rotationLoop(id, epoch), rec.rotateEveryMs);
+    }
+    function armRotation(id, epoch) {
+        const rec = db.scripts[id];
+        const r = rtOf(id);
+        if (rec && rec.rotateEveryMs) r.rotTimer = schedule(() => rotationLoop(id, epoch), rec.rotateEveryMs);
+    }
+
     // ---- sessions ----------------------------------------------------------
     // Each start/stop bumps r.epoch. A tick only builds or reschedules if its epoch
     // is still current, so an old chain can never outlive a stop or restart.
@@ -342,6 +375,7 @@ function createLive(opts) {
         const epoch = r.epoch;              // capture now: the arrow must not read it later
         r.nextAt = now();
         r.timer = schedule(() => tick(id, epoch), 0);
+        armRotation(id, epoch);
         return { ok: true, script: publicView(rec) };
     }
 
@@ -349,6 +383,7 @@ function createLive(opts) {
         const rec = db.scripts[id];
         const r = rtOf(id);
         if (r.timer) { cancelSchedule(r.timer); r.timer = null; }
+        if (r.rotTimer) { cancelSchedule(r.rotTimer); r.rotTimer = null; }
         r.epoch += 1;                       // invalidates the running tick chain
         r.cancelled = true;                 // discards an in-flight build before publish
         r.nextAt = null;
@@ -367,6 +402,7 @@ function createLive(opts) {
                 r.epoch += 1;
                 const epoch = r.epoch;
                 r.timer = schedule(() => tick(id, epoch), 0);
+                armRotation(id, epoch);
                 r.nextAt = now();
             }
         });
@@ -394,7 +430,8 @@ function createLive(opts) {
     function getLatest(id, token) {
         const rec = db.scripts[id];
         if (!rec) return { status: 404 };
-        if (!tokenOk(token, rec.token)) return { status: 401 };
+        const previousOk = !!rec.previousToken && now() < (rec.previousTokenExp || 0) && tokenOk(token, rec.previousToken);
+        if (!tokenOk(token, rec.token) && !previousOk) return { status: 401 };
         const cur = currentGen(rec);
         if (!cur) return { status: 404, error: 'no build yet' };
         if (isExpired(cur)) return { status: 410, error: 'artifact expired' };
