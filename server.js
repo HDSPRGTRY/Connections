@@ -356,22 +356,90 @@ function adminKeyOk(given) {
     return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+// Admin auth: a signed-in browser gets an HttpOnly cookie, so the key is typed once per
+// browser session. Cookie sessions must also send X-Requested-With on writes; a cross-site
+// page cannot add that header without a CORS preflight, which blocks cross-site writes.
+const ADMIN_COOKIE = 'admin_session';
+const ADMIN_SESSION_MS = 12 * 60 * 60 * 1000;
+const adminSessions = new Map(); // sha256(token) -> expiresAt (memory only: a restart asks for the key again)
+function sha256hex(v) { return crypto.createHash('sha256').update(v, 'utf8').digest('hex'); }
+function isHttps(req) {
+    return !!req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+}
+function cookieAdmin(req) {
+    const m = /(?:^|;\s*)admin_session=([A-Za-z0-9_-]{20,})/.exec(String(req.headers.cookie || ''));
+    if (!m) return false;
+    const h = sha256hex(m[1]);
+    const exp = adminSessions.get(h);
+    if (!exp) return false;
+    if (Date.now() > exp) { adminSessions.delete(h); return false; }
+    adminSessions.set(h, Date.now() + ADMIN_SESSION_MS);   // sliding expiry
+    return true;
+}
+function setAdminCookie(req, res) {
+    const tok = crypto.randomBytes(32).toString('base64url');
+    adminSessions.set(sha256hex(tok), Date.now() + ADMIN_SESSION_MS);
+    const secure = isHttps(req) ? '; Secure' : '';
+    res.set('Set-Cookie', ADMIN_COOKIE + '=' + tok + '; Path=/; HttpOnly; SameSite=Strict; Max-Age=' + (ADMIN_SESSION_MS / 1000) + secure);
+}
+function clearAdminCookie(req, res) {
+    const m = /(?:^|;\s*)admin_session=([A-Za-z0-9_-]{20,})/.exec(String(req.headers.cookie || ''));
+    if (m) adminSessions.delete(sha256hex(m[1]));
+    res.set('Set-Cookie', ADMIN_COOKIE + '=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0' + (isHttps(req) ? '; Secure' : ''));
+}
+function adminThrottled(ip) {
+    const rec = adminFails.get(ip);
+    return !!(rec && rec.n >= 20 && Date.now() - rec.t < 10 * 60 * 1000);
+}
+function adminFailed(ip) {
+    const rec = adminFails.get(ip);
+    const r = rec && Date.now() - rec.t < 10 * 60 * 1000 ? rec : { n: 0, t: Date.now() };
+    r.n += 1;
+    adminFails.set(ip, r);
+}
 function requireAdmin(req, res, next) {
     if (!ADMIN_KEY) return res.status(503).json({ error: 'admin disabled (ADMIN_KEY not set)' });
-    const ip = String(req.ip || '');
-    const rec = adminFails.get(ip);
-    if (rec && rec.n >= 20 && Date.now() - rec.t < 10 * 60 * 1000) {
-        return res.status(429).json({ error: 'too many attempts, try later' });
+    if (cookieAdmin(req)) {
+        if (req.method !== 'GET' && req.get('x-requested-with') !== 'admin') {
+            return res.status(403).json({ error: 'missing request header' });
+        }
+        return next();
     }
+    // Header-key path, kept for scripts and curl.
+    const ip = String(req.ip || '');
+    if (adminThrottled(ip)) return res.status(429).json({ error: 'too many attempts, try later' });
     if (!adminKeyOk(req.get('x-admin-key') || '')) {
-        const r = rec && Date.now() - rec.t < 10 * 60 * 1000 ? rec : { n: 0, t: Date.now() };
-        r.n += 1;
-        adminFails.set(ip, r);
+        adminFailed(ip);
         return res.status(401).json({ error: 'unauthorized' });
     }
     adminFails.delete(ip);
     next();
 }
+
+// Session endpoints for the admin page.
+app.get('/admin/api/session', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!ADMIN_KEY) return res.json({ ok: false, reason: 'disabled' });
+    res.json({ ok: cookieAdmin(req) });
+});
+app.post('/admin/api/login', (req, res) => {
+    const ip = String(req.ip || '');
+    if (!ADMIN_KEY) return res.status(503).json({ error: 'admin disabled (ADMIN_KEY not set)' });
+    if (adminThrottled(ip)) return res.status(429).json({ error: 'too many attempts, try later' });
+    if (!adminKeyOk(String((req.body || {}).key || ''))) {
+        adminFailed(ip);
+        return res.status(401).json({ error: 'wrong admin key' });
+    }
+    adminFails.delete(ip);
+    setAdminCookie(req, res);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true });
+});
+app.post('/admin/api/logout', (req, res) => {
+    if (req.get('x-requested-with') !== 'admin') return res.status(403).json({ error: 'missing request header' });
+    clearAdminCookie(req, res);
+    res.json({ ok: true });
+});
 
 function isPrivateAddress(ip) {
     const v = netMod.isIP(ip);
