@@ -1195,6 +1195,7 @@ function obfuscate(src, seed, opts) {
   function tpl(str) { return str.replace(/@(\w+)@/g, function (m, n) { return ln(n); }); }
   var KN     = PREFIX + 'K';       // runtime key (anti-tamper adjusted)
   var ENVFN  = inm('F');           // env resolver
+  var FBN    = inm('G');           // fallback table of the hidden globals (see env resolver)
   var CHN    = inm('C');           // packed KCHAIN string
   var BXN    = inm('X');           // xor helper
   var KYN    = inm('Y');           // key derivation helper
@@ -1924,12 +1925,16 @@ function obfuscate(src, seed, opts) {
       h += 'local ' + KN + '=' + SALT + ';\n';
     }
     if (doHideEnv) {
+      // Fallback: one getter per hidden global, each reading the global when called (so values
+      // assigned later are seen). Luau's _G does not hold the environment's globals.
+      h += 'local ' + FBN + '={' + Object.keys(ENV_NAMES).map(function (n) { return n + '=function() return ' + n + ' end'; }).join(',') + '};\n';
       h += tpl('local function ' + ENVFN + '(@n@)\n'
         + 'local @g@=getgenv and getgenv()\n'
         + 'if type(@g@)=="table" and @g@[@n@]~=nil then return @g@[@n@] end\n'
         + '@g@=getrenv and getrenv()\n'
         + 'if type(@g@)=="table" and @g@[@n@]~=nil then return @g@[@n@] end\n'
-        + 'if type(_G)=="table" then return _G[@n@] end\n'
+        + 'if type(_G)=="table" and _G[@n@]~=nil then return _G[@n@] end\n'
+        + 'if ' + FBN + '[@n@] then return ' + FBN + '[@n@]() end\n'
         + 'return nil\nend;\n');
     }
     h += 'local ' + CHN + '="' + chainPacked + '";\n';
