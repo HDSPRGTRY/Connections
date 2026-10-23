@@ -11,7 +11,7 @@ const PROFILES = ['light', 'medium', 'heavy', 'maximum'];
 const LIMITS = {
     maxScripts: 20,
     maxGenerations: 5,          // artifacts kept per script (current included)
-    minIntervalMs: 6000,        // spec target: 6 s
+    minIntervalMs: 1000,        // check interval: 1 s to 1 h
     maxIntervalMs: 60 * 60 * 1000,
     minTtlMs: 60 * 1000,
     minRotateMs: 1000,          // token rotation: 0 = off, otherwise 1 s to 24 h
