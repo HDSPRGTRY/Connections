@@ -1,5 +1,5 @@
 'use strict';
-// Remote copy of Live state on a PRIVATE Pastefy paste. Used so state survives a
+// Remote copy of Live state on an UNLISTED Pastefy paste (unlisted = not in listings, reachable only by id). Used so state survives a
 // redeploy that wipes DATA_DIR. Only the state JSON goes here; artifacts are rebuilt
 // from their sources on restore.
 //
@@ -33,7 +33,7 @@ function createPastefyRemote(opts) {
         async load() {
             if (!pasteId) {
                 const created = await req('POST', '/paste', {
-                    title: 'LIVE-STATE (do not touch)', content: '{}', visibility: 'PRIVATE', type: 'PASTE' });
+                    title: 'LIVE-STATE (do not touch)', content: '{}', visibility: 'UNLISTED' });
                 const nid = created && created.paste && created.paste.id;
                 if (!nid) throw new Error('could not create the live state paste');
                 pasteId = nid;
