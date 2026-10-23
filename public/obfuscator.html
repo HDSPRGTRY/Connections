@@ -532,6 +532,13 @@
 .live-table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:6px}
 .live-table th,.live-table td{text-align:left;padding:4px 6px;border-bottom:1px solid rgba(128,128,128,.3);vertical-align:top}
 .live-table td.err{color:#c0392b}
+.live-scroll{overflow-x:auto;margin-bottom:8px}
+.live-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:12px}
+.live-field{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--dim-2)}
+.live-field.wide{grid-column:1/-1}
+.live-field input,.live-field select{width:100%;min-width:0;box-sizing:border-box}
+.live-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+.live-link{word-break:break-all;font-family:var(--font-mono);font-size:11px}
 </style>
 </head>
 <body>
@@ -567,7 +574,7 @@
   </div>
 
   <section class="admin" id="admin" hidden>
-    <div class="admin-head"><span>Admin</span><span id="adminState">locked</span></div>
+    <div class="admin-head"><span>Admin</span><span><span id="adminState">locked</span> <button type="button" id="adminSignOut" hidden>Sign out</button></span></div>
     <div class="admin-lock" id="adminLock">
       <div class="admin-row">
         <input type="password" id="adminKey" autocomplete="off" placeholder="ADMIN_KEY">
@@ -594,22 +601,32 @@
       </div>
       <div class="admin-block">
         <div class="admin-title">Live VM</div>
-        <div class="admin-list" id="liveTable"></div>
+        <div class="live-scroll"><div class="live-table-wrap" id="liveTable"></div></div>
         <div class="field-hint" id="liveMsg"></div>
-        <div class="admin-row">
-          <select id="liveSelect"><option value="">+ new script</option></select>
-          <input type="text" id="liveName" placeholder="Name" maxlength="60">
+        <div class="live-grid">
+          <label class="live-field wide">Script
+            <select id="liveSelect"><option value="">+ new script</option></select>
+          </label>
+          <label class="live-field">Name
+            <input type="text" id="liveName" placeholder="Name" maxlength="60">
+          </label>
+          <label class="live-field">Profile
+            <select id="liveProfile"><option>light</option><option>medium</option><option>heavy</option><option selected>maximum</option></select>
+          </label>
+          <label class="live-field wide">Source link (raw Lua)
+            <input type="text" id="liveSource" placeholder="https://... raw Lua link" spellcheck="false">
+          </label>
+          <label class="live-field">Check interval (ms, min 6000)
+            <input type="number" id="liveInterval" min="6000" step="1000" value="6000">
+          </label>
+          <label class="live-field">Artifact lifetime (hours)
+            <input type="number" id="liveTtl" min="1" step="1" value="24">
+          </label>
+          <label class="live-field">VM layer
+            <span><input type="checkbox" id="liveVm" checked> enabled</span>
+          </label>
         </div>
-        <div class="admin-row">
-          <input type="text" id="liveSource" placeholder="https://... raw Lua link" spellcheck="false">
-        </div>
-        <div class="admin-row">
-          <select id="liveProfile"><option>light</option><option>medium</option><option>heavy</option><option selected>maximum</option></select>
-          <label class="field-hint"><input type="checkbox" id="liveVm" checked> VM layer</label>
-          <input type="number" id="liveInterval" min="6000" step="1000" value="6000" title="Check interval, ms (min 6000)">
-          <input type="number" id="liveTtl" min="1" step="1" value="24" title="Artifact lifetime, hours">
-        </div>
-        <div class="admin-row">
+        <div class="live-actions">
           <button type="button" id="liveSave">Save</button>
           <button type="button" id="liveBuild">Build now</button>
           <button type="button" id="liveStart">Start Live VM</button>
@@ -617,7 +634,7 @@
           <button type="button" id="liveRotate">Rotate token</button>
           <button type="button" id="liveDelete">Delete</button>
         </div>
-        <div class="field-hint" id="liveDetail"></div>
+        <div class="field-hint live-link" id="liveDetail"></div>
       </div>
       <textarea id="adminOut" readonly spellcheck="false" placeholder="Fetched text appears here"></textarea>
     </div>
@@ -1028,16 +1045,19 @@
 <script>
 (function () {
   // The admin key lives only in this variable: never stored, never logged.
-  var KEY = '';
   var $ = function (id) { return document.getElementById(id); };
 
+  // Requests ride on the HttpOnly admin cookie. The key is never stored in the page.
   function call(method, path, body) {
     return fetch(path, {
       method: method,
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Key': KEY },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'admin' },
       body: body ? JSON.stringify(body) : undefined
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (data) {
+        if (r.status === 401 && !$('adminBody').hidden) lockPanel('session ended, sign in again');
         return { ok: r.ok, status: r.status, data: data };
       });
     });
@@ -1096,6 +1116,7 @@
   var liveScripts = [];
   var liveTimer = null;
   function liveMsg(t, isErr) { $('liveMsg').textContent = t || ''; $('liveMsg').style.color = isErr ? '#c0392b' : ''; }
+  function deliveryUrl(sc) { return location.origin + sc.url + '?token=' + sc.token; }
   function fmtTime(ms) { return ms ? new Date(ms).toLocaleString() : '\u2014'; }
   function cell(tr, text, cls) { var td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; tr.appendChild(td); }
 
@@ -1105,7 +1126,7 @@
     else {
       var t = document.createElement('table'); t.className = 'live-table';
       var head = document.createElement('tr');
-      ['Name', 'Status', 'Generation', 'Artifact', 'Expires', 'Last success', 'Next check', 'Source hash', 'Engine', 'Last error'].forEach(function (h) {
+      ['Name', 'Status', 'Generation', 'Delivery link (current)', 'Expires', 'Last success', 'Next check', 'Source hash', 'Engine', 'Last error'].forEach(function (h) {
         var th = document.createElement('th'); th.textContent = h; head.appendChild(th);
       });
       t.appendChild(head);
@@ -1115,7 +1136,7 @@
         cell(tr, sc.name);
         cell(tr, sc.status + (sc.overlapSkips ? ' (overlaps ' + sc.overlapSkips + ')' : ''));
         cell(tr, cur ? (cur.id + (cur.expired ? ' (expired)' : '')) : 'none yet');
-        cell(tr, cur ? sc.url : '\u2014');
+        cell(tr, deliveryUrl(sc), 'live-link');
         cell(tr, cur ? fmtTime(cur.expiresAt) : '\u2014');
         cell(tr, fmtTime(sc.lastSuccessAt));
         cell(tr, sc.running ? fmtTime(sc.nextAt) : 'not running');
@@ -1126,13 +1147,13 @@
       });
       box.appendChild(t);
     }
-    var sel = $('liveSelect'), keep = sel.value;
+    var sel = $('liveSelect');
     sel.textContent = '';
     var none = document.createElement('option'); none.value = ''; none.textContent = '+ new script'; sel.appendChild(none);
     liveScripts.forEach(function (sc) {
       var o = document.createElement('option'); o.value = sc.id; o.textContent = sc.name + ' [' + sc.status + ']'; sel.appendChild(o);
     });
-    sel.value = keep;
+    sel.value = liveCurrentId;
   }
 
   function liveLoad() {
@@ -1143,11 +1164,14 @@
       fillForm();
     });
   }
-  function selected() { var id = $('liveSelect').value; return liveScripts.filter(function (s) { return s.id === id; })[0] || null; }
+  // The chosen script is remembered here, not in the <select>, because a select can only hold
+  // a value once its option exists (a newly saved script's option appears on the next refresh).
+  var liveCurrentId = '';
+  function selected() { return liveScripts.filter(function (s) { return s.id === liveCurrentId; })[0] || null; }
   function fillForm() {
     var sc = selected();
     if (!sc) return;
-    $('liveDetail').textContent = 'Delivery: ' + location.origin + sc.url + '?token=' + sc.token;
+    $('liveDetail').textContent = 'Delivery: ' + deliveryUrl(sc);
   }
   function formBody() {
     return {
@@ -1169,6 +1193,7 @@
   }
 
   $('liveSelect').addEventListener('change', function () {
+    liveCurrentId = $('liveSelect').value;
     var sc = selected();
     if (sc) { $('liveName').value = sc.name; $('liveSource').value = sc.sourceUrl; $('liveProfile').value = sc.profile;
       $('liveVm').checked = sc.vm; $('liveInterval').value = sc.intervalMs; $('liveTtl').value = Math.round(sc.ttlMs / 3600000); }
@@ -1180,7 +1205,7 @@
     liveMsg('saving...');
     call('POST', '/admin/api/live', body).then(function (res) {
       if (!res.ok) { liveMsg(errText(res), true); return; }
-      if (res.data.script) $('liveSelect').value = res.data.script.id;
+      if (res.data.script) liveCurrentId = res.data.script.id;
       liveMsg('saved (config changes take effect on the next check)'); return liveLoad();
     }).catch(function () { liveMsg('server unreachable', true); });
   });
@@ -1196,24 +1221,60 @@
     if (!confirm('Delete "' + sc.name + '", its artifacts and its session?')) return;
     call('DELETE', '/admin/api/live/' + sc.id).then(function (res) {
       if (!res.ok) { liveMsg(errText(res), true); return; }
-      $('liveSelect').value = ''; liveMsg('deleted'); return liveLoad();
+      liveCurrentId = ''; $('liveSelect').value = ''; liveMsg('deleted'); return liveLoad();
     });
   }));
   // Status refresh every 6 s while the panel is unlocked.
   function startLiveRefresh() { if (!liveTimer) liveTimer = setInterval(liveLoad, 6000); }
 
+  function login(key) {
+    return fetch('/admin/api/login', {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key })
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) { return { ok: r.ok, status: r.status, data: data }; });
+    });
+  }
+  function enterPanel() {
+    showPanel();
+    $('adminSignOut').hidden = false;
+    call('GET', '/admin/api/entries').then(function (res) {
+      if (res.ok) renderList(res.data.entries || []);
+    });
+    liveLoad(); startLiveRefresh();
+  }
+  function lockPanel(message) {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    $('adminBody').hidden = true;
+    $('adminLock').hidden = false;
+    $('adminState').textContent = 'locked';
+    $('adminSignOut').hidden = true;
+    setMsg(message || '');
+  }
+  // Return visits: if the browser already has a valid admin cookie, open the panel directly.
+  function checkSession() {
+    if (location.hash !== '#admin') return;
+    fetch('/admin/api/session', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok) enterPanel(); })
+      .catch(function () { /* stay locked */ });
+  }
+  $('adminSignOut').addEventListener('click', function () {
+    call('POST', '/admin/api/logout', {}).then(function () { lockPanel('signed out'); });
+  });
+
   $('adminUnlock').addEventListener('click', function () {
     var candidate = $('adminKey').value;
     if (!candidate) { setMsg('enter the admin key'); return; }
-    KEY = candidate;
-    call('GET', '/admin/api/entries').then(function (res) {
-      if (!res.ok) { KEY = ''; setMsg(errText(res)); return; }
-      showPanel();
-      renderList(res.data.entries || []);
-      liveLoad(); startLiveRefresh();
-    }).catch(function () { KEY = ''; setMsg('server unreachable'); });
+    login(candidate).then(function (res) {
+      if (!res.ok) { setMsg(res.status === 401 ? 'wrong admin key' : errText(res)); return; }
+      $('adminKey').value = '';
+      enterPanel();
+    }).catch(function () { setMsg('server unreachable'); });
   });
   $('adminKey').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('adminUnlock').click(); });
+  checkSession();
 
   // Raw paste: fetches the link every time the button is pressed.
   $('rawFetch').addEventListener('click', function () {
