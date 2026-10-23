@@ -41,7 +41,6 @@ app.get('/modules/:file', (req, res) => {
     sendJs(res, path.join(__dirname, 'obfuscator', 'modules', f));
 });
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 // Never let Discord / misc async errors take Express down (would 503 every
 // route, including /modules/*.js which the obfuscator dynamic-imports).
@@ -648,7 +647,16 @@ const { internals: engineInternals } = require('./obfuscator/engine.js');
 const LIVE_ENGINE_PATH = path.join(__dirname, 'obfuscator', 'engine.js');
 const liveEngineVersion = 'engine-' + crypto.createHash('sha256')
     .update(require('fs').readFileSync(LIVE_ENGINE_PATH)).digest('hex').slice(0, 12);
+// Live state on a PRIVATE Pastefy paste (see remote_pastefy.js). LIVE_STATE_PASTE is the
+// paste id, set once in the host's env vars, which persist across deploys.
+const { createPastefyRemote } = require('./remote_pastefy.js');
+const liveRemote = PASTEFY_API_KEY ? createPastefyRemote({
+    apiKey: PASTEFY_API_KEY, api: PASTEFY_API, pasteId: process.env.LIVE_STATE_PASTE || '',
+    log: (m) => console.log(m)
+}) : null;
+
 const live = createLive({
+    remote: liveRemote,
     dataDir: process.env.DATA_DIR || path.join(__dirname, 'data'),
     engineVersion: liveEngineVersion,
     internals: engineInternals,
@@ -662,6 +670,13 @@ const live = createLive({
     log: (m) => console.log(m)
 });
 mountLiveRoutes(app, live, requireAdmin);
+
+// Listen only after live state is restored, so the first request sees it.
+(async () => {
+    try { const h = await live.hydrate(); console.log('[live] state restored: ' + JSON.stringify(h)); }
+    catch (e) { console.error('[live] restore failed, continuing with local state:', e && e.message ? e.message : e); }
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+})();
 
 if (!BOT_TOKEN) {
     console.warn('[discord] BOT_TOKEN missing — bot login skipped, web endpoints still live');
