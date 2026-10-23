@@ -652,6 +652,11 @@ const liveRemote = PASTEFY_API_KEY ? createPastefyRemote({
     apiKey: PASTEFY_API_KEY, api: PASTEFY_API, pasteId: process.env.LIVE_STATE_PASTE || '',
     log: (m) => console.log(m)
 }) : null;
+if (!PASTEFY_API_KEY) {
+    console.warn('[live] WARNING: PASTEFY_API_KEY is not set. Live scripts are kept only on this disk and are lost on every restart.');
+} else if (!process.env.LIVE_STATE_PASTE) {
+    console.warn('[live] WARNING: LIVE_STATE_PASTE is not set. A new empty state paste is created on every start, so Live scripts disappear on restart. Set LIVE_STATE_PASTE to the id printed by "state paste created" on first start.');
+}
 
 const live = createLive({
     remote: liveRemote,
