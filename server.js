@@ -57,7 +57,7 @@ process.on('uncaughtException', (err) => {
 // synchronously and could crash the process on old runtimes).
 const HAS_FETCH = typeof fetch !== 'undefined';
 if (HAS_FETCH) {
-    setInterval(() => {
+    const keepAliveTimer = setInterval(() => {
         try {
             Promise.resolve(fetch(`http://localhost:${PORT}`)).catch(err =>
                 console.error('Keep-alive ping failed:', err && err.message ? err.message : err));
@@ -65,6 +65,7 @@ if (HAS_FETCH) {
             console.error('Keep-alive ping failed:', err && err.message ? err.message : err);
         }
     }, 25000);
+    if (keepAliveTimer.unref) keepAliveTimer.unref(); // does not keep the process alive by itself
 } else {
     console.warn('[server] global fetch unavailable (Node <18) — keep-alive ping disabled');
 }
@@ -185,11 +186,12 @@ const NONCE_TTL_MS = 60 * 1000;
 
 const vaultTokens = new Map(); // token -> {userId, jobId, exp, count, win}
 const vaultNonces = new Map(); // nonce -> exp
-setInterval(() => {
+const vaultSweepTimer = setInterval(() => {
     const now = Date.now();
     for (const [t, r] of vaultTokens) if (r.exp <= now) vaultTokens.delete(t);
     for (const [t, e] of vaultNonces) if (e <= now) vaultNonces.delete(t);
 }, 60000);
+if (vaultSweepTimer.unref) vaultSweepTimer.unref();
 
 function fnv64hex(str) {
     let h = 0xcbf29ce484222325n;
