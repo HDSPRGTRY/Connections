@@ -479,9 +479,10 @@ async function checkPublicUrl(raw) {
     return u;
 }
 
-async function adminFetchText(rawUrl) {
+async function adminFetchText(rawUrl, allowHost) {
     if (typeof fetch === 'undefined') throw new Error('fetch unavailable on this Node version');
     let u = await checkPublicUrl(rawUrl);
+    if (allowHost && !allowHost(u.hostname)) throw new Error('this host is not on the fetch list');
     for (let hop = 0; hop < 4; hop++) {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), ADMIN_FETCH_MS);
@@ -494,6 +495,7 @@ async function adminFetchText(rawUrl) {
             const loc = r.headers.get('location');
             if (r.status >= 300 && r.status < 400 && loc) {
                 u = await checkPublicUrl(new URL(loc, u).toString());
+                if (allowHost && !allowHost(u.hostname)) throw new Error('redirect to a host that is not on the fetch list');
                 continue;
             }
             if (!r.ok) throw new Error('upstream HTTP ' + r.status);
@@ -585,6 +587,33 @@ app.delete('/admin/api/entries/:id', requireAdmin, adminReady, async (req, res) 
     if (adminEntries.length === previous.length) return res.status(404).json({ error: 'no such entry' });
     if (!(await adminSave(previous))) return res.status(502).json({ error: 'could not save the list' });
     res.json({ ok: true, entries: adminEntries.map(e => ({ id: e.id, label: e.label, url: e.url })) });
+});
+
+// Public source fetch for the obfuscator page. Only listed hosts (FETCH_HOSTS), 30 requests
+// per client per 10 minutes, the same private-address and size checks as the admin fetch.
+app.set('trust proxy', 1); // Render's proxy: req.ip becomes the real client address
+const FETCH_HOSTS = new Set((process.env.FETCH_HOSTS || 'fast-note.com,pastefy.app,raw.githubusercontent.com,gist.githubusercontent.com,pastebin.com')
+    .split(',').map(x => x.trim().toLowerCase()).filter(Boolean));
+const pubFetchHits = new Map(); // ip -> {n, t}
+const PUB_FETCH_MAX = 30;
+const PUB_FETCH_WINDOW_MS = 10 * 60 * 1000;
+app.post('/api/fetch-source', async (req, res) => {
+    const ip = String(req.ip || '');
+    const now = Date.now();
+    if (pubFetchHits.size > 5000) pubFetchHits.clear();
+    const rec = pubFetchHits.get(ip);
+    const cur = rec && now - rec.t < PUB_FETCH_WINDOW_MS ? rec : { n: 0, t: now };
+    if (cur.n >= PUB_FETCH_MAX) return res.status(429).json({ error: 'too many fetches, try again in a few minutes' });
+    cur.n += 1;
+    pubFetchHits.set(ip, cur);
+    const url = String((req.body || {}).url || '').trim();
+    try {
+        const r = await adminFetchText(url, (host) => FETCH_HOSTS.has(String(host).toLowerCase()));
+        res.set('Cache-Control', 'no-store');
+        res.json({ ok: true, status: r.status, text: r.text });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    }
 });
 
 app.post('/admin/api/fetch', requireAdmin, async (req, res) => {
