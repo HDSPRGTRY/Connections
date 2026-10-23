@@ -622,6 +622,9 @@
           <label class="live-field">Artifact lifetime (hours)
             <input type="number" id="liveTtl" min="1" step="1" value="24">
           </label>
+          <label class="live-field">Rotate link every (seconds, 0 = never, min 6)
+            <input type="number" id="liveRotSec" min="0" step="1" value="0">
+          </label>
           <label class="live-field">VM layer
             <span><input type="checkbox" id="liveVm" checked> enabled</span>
           </label>
@@ -1171,7 +1174,8 @@
   function fillForm() {
     var sc = selected();
     if (!sc) return;
-    $('liveDetail').textContent = 'Delivery: ' + deliveryUrl(sc);
+    $('liveDetail').textContent = 'Delivery: ' + deliveryUrl(sc) +
+      (sc.rotateEveryMs ? '   (rotates every ' + Math.round(sc.rotateEveryMs / 1000) + ' s, last rotated ' + fmtTime(sc.tokenRotatedAt ? Date.parse(sc.tokenRotatedAt) : 0) + ')' : '');
   }
   function formBody() {
     return {
@@ -1181,7 +1185,8 @@
       profile: $('liveProfile').value,
       vm: $('liveVm').checked,
       intervalMs: Number($('liveInterval').value),
-      ttlMs: Number($('liveTtl').value) * 3600000
+      ttlMs: Number($('liveTtl').value) * 3600000,
+      rotateEveryMs: Number($('liveRotSec').value) * 1000
     };
   }
   function liveAct(path, body, okText) {
@@ -1196,7 +1201,8 @@
     liveCurrentId = $('liveSelect').value;
     var sc = selected();
     if (sc) { $('liveName').value = sc.name; $('liveSource').value = sc.sourceUrl; $('liveProfile').value = sc.profile;
-      $('liveVm').checked = sc.vm; $('liveInterval').value = sc.intervalMs; $('liveTtl').value = Math.round(sc.ttlMs / 3600000); }
+      $('liveVm').checked = sc.vm; $('liveInterval').value = sc.intervalMs; $('liveTtl').value = Math.round(sc.ttlMs / 3600000);
+      $('liveRotSec').value = Math.round((sc.rotateEveryMs || 0) / 1000); }
     fillForm();
   });
   $('liveSave').addEventListener('click', function () {
