@@ -202,7 +202,7 @@ function fnv64hex(str) {
     return h.toString(16).padStart(16, '0');
 }
 
-// Best-effort audit sink to a PRIVATE Pastefy paste. Never gating: failures
+// Best-effort audit sink to an UNLISTED Pastefy paste. Never gating: failures
 // are swallowed, gameplay never waits on it. Disabled without a key.
 let auditPasteId = process.env.VAULT_AUDIT_PASTE || '';
 async function pastefyReq(method, p, body) {
@@ -231,8 +231,7 @@ function vaudit(ev) {
                 const created = await pastefyReq('POST', '/paste', {
                     title: 'VAULT-AUDIT (do not touch)',
                     content: line,
-                    visibility: 'PRIVATE',
-                    type: 'PASTE'
+                    visibility: 'UNLISTED'
                 });
                 const nid = created && created.paste && created.paste.id;
                 if (nid) {
@@ -530,8 +529,7 @@ async function adminLoad() {
         const created = await pastefyReq('POST', '/paste', {
             title: 'ADMIN-FETCH-LIST (do not touch)',
             content: '[]',
-            visibility: 'PRIVATE',
-            type: 'PASTE'
+            visibility: 'UNLISTED'
         });
         const nid = created && created.paste && created.paste.id;
         if (!nid) return false;
@@ -647,7 +645,7 @@ const { internals: engineInternals } = require('./obfuscator/engine.js');
 const LIVE_ENGINE_PATH = path.join(__dirname, 'obfuscator', 'engine.js');
 const liveEngineVersion = 'engine-' + crypto.createHash('sha256')
     .update(require('fs').readFileSync(LIVE_ENGINE_PATH)).digest('hex').slice(0, 12);
-// Live state on a PRIVATE Pastefy paste (see remote_pastefy.js). LIVE_STATE_PASTE is the
+// Live state on an UNLISTED Pastefy paste (see remote_pastefy.js). LIVE_STATE_PASTE is the
 // paste id, set once in the host's env vars, which persist across deploys.
 const { createPastefyRemote } = require('./remote_pastefy.js');
 const liveRemote = PASTEFY_API_KEY ? createPastefyRemote({
