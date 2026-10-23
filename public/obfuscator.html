@@ -539,6 +539,8 @@
 .live-field input,.live-field select{width:100%;min-width:0;box-sizing:border-box}
 .live-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
 .live-link{word-break:break-all;white-space:pre-line;font-family:var(--font-mono);font-size:11px}
+.live-loader{display:flex;flex-direction:column;gap:10px;margin-top:10px;padding:12px;border:1px solid rgba(128,128,128,.3);border-radius:6px}
+.loader-code{width:100%;box-sizing:border-box;font-family:var(--font-mono);font-size:12px;resize:vertical;min-height:48px}
 </style>
 </head>
 <body>
@@ -638,6 +640,21 @@
           <button type="button" id="liveDelete">Delete</button>
         </div>
         <div class="field-hint live-link" id="liveDetail"></div>
+        <div class="admin-title" style="margin-top:14px">Permanent loader</div>
+        <div class="live-loader">
+          <div class="field-hint" id="loaderStatus"></div>
+          <label class="live-field wide">Stable reference (permanent; the loader uses this)
+            <span class="live-link" id="loaderRef">&mdash;</span>
+          </label>
+          <label class="live-field wide">Loader snippet (read-only, paste into the game)
+            <textarea id="loaderCode" class="loader-code" readonly rows="2" spellcheck="false"></textarea>
+          </label>
+          <div class="live-actions">
+            <button type="button" id="loaderCopy">Copy</button>
+            <button type="button" id="loaderRotate">Rotate reference</button>
+          </div>
+          <div class="field-hint">Current generation: <span id="loaderGen">none</span> &middot; Loads: <span id="loaderAccess">0</span></div>
+        </div>
       </div>
       <textarea id="adminOut" readonly spellcheck="false" placeholder="Fetched text appears here"></textarea>
     </div>
@@ -1176,10 +1193,44 @@
   // a value once its option exists (a newly saved script's option appears on the next refresh).
   var liveCurrentId = '';
   function selected() { return liveScripts.filter(function (s) { return s.id === liveCurrentId; })[0] || null; }
+  function loaderSnippet(key) {
+    return 'loadstring(game:HttpGet("' + location.origin + '/live/ref/' + key + '"))()';
+  }
+  // The snippet depends only on the stable reference, so it is written once per key.
+  // The status lines follow the current generation on every refresh.
+  function renderLoader(sc) {
+    var box = $('loaderCode');
+    if (!sc || !sc.reference) {
+      $('loaderRef').textContent = '\u2014';
+      box.value = '';
+      $('loaderGen').textContent = 'none';
+      $('loaderAccess').textContent = '0';
+      $('loaderStatus').textContent = 'Save a script to get its loader.';
+      $('loaderRotate').disabled = true;
+      return;
+    }
+    $('loaderRotate').disabled = false;
+    var snippet = loaderSnippet(sc.reference.key);
+    if (box.value !== snippet) box.value = snippet;
+    $('loaderRef').textContent = sc.reference.key;
+    var cur = sc.current;
+    var text;
+    if (sc.loaderState === 'valid') {
+      text = 'Active. Serving generation ' + cur.id + ', valid until ' + fmtTime(cur.expiresAt) + '.';
+    } else if (sc.loaderState === 'expired') {
+      text = 'Expired. Generation ' + cur.id + ' is past its lifetime, so the loader returns 410 until a new build is published. Press Build now or Start Live VM.';
+    } else {
+      text = 'No valid artifact yet. The loader returns 404 until the first build succeeds. Press Build now or Start Live VM.';
+    }
+    $('loaderStatus').textContent = text;
+    $('loaderGen').textContent = cur ? cur.id : 'none';
+    $('loaderAccess').textContent = sc.reference.accessCount + (sc.reference.lastAccessAt ? ', last ' + fmtTime(Date.parse(sc.reference.lastAccessAt)) : '');
+  }
   function fillForm() {
     var sc = selected();
+    renderLoader(sc);
     if (!sc) return;
-    $('liveDetail').textContent = 'Delivery: ' + deliveryUrl(sc) +
+    $('liveDetail').textContent = 'Internal artifact URL (changes on token rotation; do not put this in a game): ' + deliveryUrl(sc) +
       (sc.rotateEveryMs
         ? '\nRotates every ' + Math.round(sc.rotateEveryMs / 1000) + ' s. Last rotated ' + fmtTime(sc.tokenRotatedAt ? Date.parse(sc.tokenRotatedAt) : 0) +
           '. Next rotation ' + (sc.nextRotationAt ? fmtTime(sc.nextRotationAt) : 'not scheduled (VM stopped)') + '.'
@@ -1238,6 +1289,28 @@
       liveCurrentId = ''; $('liveSelect').value = ''; liveMsg('deleted'); return liveLoad();
     });
   }));
+  $('loaderCopy').addEventListener('click', function () {
+    var box = $('loaderCode');
+    if (!box.value) return;
+    function done(ok) {
+      $('loaderCopy').textContent = ok ? 'Copied' : 'Copy failed';
+      setTimeout(function () { $('loaderCopy').textContent = 'Copy'; }, 1500);
+    }
+    function fallback() {
+      box.focus(); box.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      done(ok);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(box.value).then(function () { done(true); }, fallback);
+    } else { fallback(); }
+  });
+  $('loaderRotate').addEventListener('click', needSel(function (sc) {
+    if (!confirm('Rotate the stable reference? The current loader stops working immediately. You must paste the new snippet into the game.')) return;
+    liveAct('/admin/api/live/' + sc.id + '/rotate-reference', {}, 'reference rotated: copy the new snippet');
+  }));
+
   // Status refresh every 6 s while the panel is unlocked.
   function startLiveRefresh() { if (!liveTimer) liveTimer = setInterval(liveLoad, 6000); }
 
