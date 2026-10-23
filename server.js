@@ -541,6 +541,29 @@ app.post('/admin/api/entries/:id/fetch', requireAdmin, adminReady, async (req, r
     }
 });
 
+// ---- Live VM: per-script config, builds, versioned artifacts, sessions ----
+// Stored under DATA_DIR (default ./data). On Render this path is wiped on every
+// deploy/restart unless a persistent disk is mounted there; see the notes.
+const { createLive, mountLiveRoutes } = require('./live.js');
+const { internals: engineInternals } = require('./obfuscator/engine.js');
+const LIVE_ENGINE_PATH = path.join(__dirname, 'obfuscator', 'engine.js');
+const liveEngineVersion = 'engine-' + crypto.createHash('sha256')
+    .update(require('fs').readFileSync(LIVE_ENGINE_PATH)).digest('hex').slice(0, 12);
+const live = createLive({
+    dataDir: process.env.DATA_DIR || path.join(__dirname, 'data'),
+    engineVersion: liveEngineVersion,
+    internals: engineInternals,
+    obfuscate: (src, seed, settings) => require('./obfuscator/engine.js').obfuscate(src, seed, settings),
+    checkUrl: (url) => checkPublicUrl(url),
+    fetchSource: async (url) => {
+        const r = await adminFetchText(url);
+        if (r.status !== 200) throw new Error('source returned HTTP ' + r.status);
+        return r.text;
+    },
+    log: (m) => console.log(m)
+});
+mountLiveRoutes(app, live, requireAdmin);
+
 if (!BOT_TOKEN) {
     console.warn('[discord] BOT_TOKEN missing — bot login skipped, web endpoints still live');
 } else {
