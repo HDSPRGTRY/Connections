@@ -529,6 +529,9 @@
   .admin-item .lbl { color: var(--text); min-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .admin-item .url { flex: 1; color: var(--dim-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #adminOut { width: 100%; min-height: 140px; margin-top: 10px; background: var(--surface-2, var(--well)); color: var(--text); border: 1px solid var(--border-lit); border-radius: var(--r-sm); padding: 10px; font-family: var(--font-mono); font-size: 11.5px; resize: vertical; box-sizing: border-box; }
+.live-table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:6px}
+.live-table th,.live-table td{text-align:left;padding:4px 6px;border-bottom:1px solid rgba(128,128,128,.3);vertical-align:top}
+.live-table td.err{color:#c0392b}
 </style>
 </head>
 <body>
@@ -588,6 +591,33 @@
           <input type="text" id="entryUrl" placeholder="https://... raw link" spellcheck="false">
           <button type="button" id="entryAdd">Add</button>
         </div>
+      </div>
+      <div class="admin-block">
+        <div class="admin-title">Live VM</div>
+        <div class="admin-list" id="liveTable"></div>
+        <div class="field-hint" id="liveMsg"></div>
+        <div class="admin-row">
+          <select id="liveSelect"><option value="">+ new script</option></select>
+          <input type="text" id="liveName" placeholder="Name" maxlength="60">
+        </div>
+        <div class="admin-row">
+          <input type="text" id="liveSource" placeholder="https://... raw Lua link" spellcheck="false">
+        </div>
+        <div class="admin-row">
+          <select id="liveProfile"><option>light</option><option>medium</option><option>heavy</option><option selected>maximum</option></select>
+          <label class="field-hint"><input type="checkbox" id="liveVm" checked> VM layer</label>
+          <input type="number" id="liveInterval" min="6000" step="1000" value="6000" title="Check interval, ms (min 6000)">
+          <input type="number" id="liveTtl" min="1" step="1" value="24" title="Artifact lifetime, hours">
+        </div>
+        <div class="admin-row">
+          <button type="button" id="liveSave">Save</button>
+          <button type="button" id="liveBuild">Build now</button>
+          <button type="button" id="liveStart">Start Live VM</button>
+          <button type="button" id="liveStop">Stop Live VM</button>
+          <button type="button" id="liveRotate">Rotate token</button>
+          <button type="button" id="liveDelete">Delete</button>
+        </div>
+        <div class="field-hint" id="liveDetail"></div>
       </div>
       <textarea id="adminOut" readonly spellcheck="false" placeholder="Fetched text appears here"></textarea>
     </div>
@@ -1062,6 +1092,116 @@
     setMsg('');
   }
 
+  // ---- Live VM -------------------------------------------------------------
+  var liveScripts = [];
+  var liveTimer = null;
+  function liveMsg(t, isErr) { $('liveMsg').textContent = t || ''; $('liveMsg').style.color = isErr ? '#c0392b' : ''; }
+  function fmtTime(ms) { return ms ? new Date(ms).toLocaleString() : '\u2014'; }
+  function cell(tr, text, cls) { var td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; tr.appendChild(td); }
+
+  function renderLive() {
+    var box = $('liveTable'); box.textContent = '';
+    if (!liveScripts.length) { var e = document.createElement('div'); e.className = 'field-hint'; e.textContent = 'No live scripts yet.'; box.appendChild(e); }
+    else {
+      var t = document.createElement('table'); t.className = 'live-table';
+      var head = document.createElement('tr');
+      ['Name', 'Status', 'Generation', 'Artifact', 'Expires', 'Last success', 'Next check', 'Source hash', 'Engine', 'Last error'].forEach(function (h) {
+        var th = document.createElement('th'); th.textContent = h; head.appendChild(th);
+      });
+      t.appendChild(head);
+      liveScripts.forEach(function (sc) {
+        var tr = document.createElement('tr');
+        var cur = sc.current;
+        cell(tr, sc.name);
+        cell(tr, sc.status + (sc.overlapSkips ? ' (overlaps ' + sc.overlapSkips + ')' : ''));
+        cell(tr, cur ? (cur.id + (cur.expired ? ' (expired)' : '')) : 'none yet');
+        cell(tr, cur ? sc.url : '\u2014');
+        cell(tr, cur ? fmtTime(cur.expiresAt) : '\u2014');
+        cell(tr, fmtTime(sc.lastSuccessAt));
+        cell(tr, sc.running ? fmtTime(sc.nextAt) : 'not running');
+        cell(tr, cur ? cur.sourceHash : '\u2014');
+        cell(tr, cur ? cur.obfuscatorVersion : '\u2014');
+        cell(tr, sc.lastError ? (sc.lastError.message + ' @ ' + sc.lastError.at) : '\u2014', sc.lastError ? 'err' : '');
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+    }
+    var sel = $('liveSelect'), keep = sel.value;
+    sel.textContent = '';
+    var none = document.createElement('option'); none.value = ''; none.textContent = '+ new script'; sel.appendChild(none);
+    liveScripts.forEach(function (sc) {
+      var o = document.createElement('option'); o.value = sc.id; o.textContent = sc.name + ' [' + sc.status + ']'; sel.appendChild(o);
+    });
+    sel.value = keep;
+  }
+
+  function liveLoad() {
+    return call('GET', '/admin/api/live').then(function (res) {
+      if (!res.ok) { liveMsg(errText(res), true); return; }
+      liveScripts = res.data.scripts || [];
+      renderLive();
+      fillForm();
+    });
+  }
+  function selected() { var id = $('liveSelect').value; return liveScripts.filter(function (s) { return s.id === id; })[0] || null; }
+  function fillForm() {
+    var sc = selected();
+    if (!sc) return;
+    $('liveDetail').textContent = 'Delivery: ' + location.origin + sc.url + '?token=' + sc.token;
+  }
+  function formBody() {
+    return {
+      id: $('liveSelect').value || undefined,
+      name: $('liveName').value.trim(),
+      sourceUrl: $('liveSource').value.trim(),
+      profile: $('liveProfile').value,
+      vm: $('liveVm').checked,
+      intervalMs: Number($('liveInterval').value),
+      ttlMs: Number($('liveTtl').value) * 3600000
+    };
+  }
+  function liveAct(path, body, okText) {
+    liveMsg('working...');
+    return call('POST', path, body || {}).then(function (res) {
+      if (!res.ok) { liveMsg(errText(res) + (res.data && res.data.script && res.data.script.lastError ? ' - ' + res.data.script.lastError.message : ''), true); return liveLoad(); }
+      liveMsg(okText); return liveLoad();
+    }).catch(function () { liveMsg('server unreachable', true); });
+  }
+
+  $('liveSelect').addEventListener('change', function () {
+    var sc = selected();
+    if (sc) { $('liveName').value = sc.name; $('liveSource').value = sc.sourceUrl; $('liveProfile').value = sc.profile;
+      $('liveVm').checked = sc.vm; $('liveInterval').value = sc.intervalMs; $('liveTtl').value = Math.round(sc.ttlMs / 3600000); }
+    fillForm();
+  });
+  $('liveSave').addEventListener('click', function () {
+    var body = formBody();
+    if (!body.sourceUrl) { liveMsg('source link is required', true); return; }
+    liveMsg('saving...');
+    call('POST', '/admin/api/live', body).then(function (res) {
+      if (!res.ok) { liveMsg(errText(res), true); return; }
+      if (res.data.script) $('liveSelect').value = res.data.script.id;
+      liveMsg('saved (config changes take effect on the next check)'); return liveLoad();
+    }).catch(function () { liveMsg('server unreachable', true); });
+  });
+  function needSel(fn) { return function () { var sc = selected(); if (!sc) { liveMsg('save the script first', true); return; } fn(sc); }; }
+  $('liveBuild').addEventListener('click', needSel(function (sc) { liveAct('/admin/api/live/' + sc.id + '/build', {}, 'build published'); }));
+  $('liveStart').addEventListener('click', needSel(function (sc) { liveAct('/admin/api/live/' + sc.id + '/start', {}, 'Live VM started'); }));
+  $('liveStop').addEventListener('click', needSel(function (sc) { liveAct('/admin/api/live/' + sc.id + '/stop', {}, 'Live VM stopped'); }));
+  $('liveRotate').addEventListener('click', needSel(function (sc) {
+    if (!confirm('Rotate the delivery token? The old token stops working immediately.')) return;
+    liveAct('/admin/api/live/' + sc.id + '/rotate-token', {}, 'token rotated');
+  }));
+  $('liveDelete').addEventListener('click', needSel(function (sc) {
+    if (!confirm('Delete "' + sc.name + '", its artifacts and its session?')) return;
+    call('DELETE', '/admin/api/live/' + sc.id).then(function (res) {
+      if (!res.ok) { liveMsg(errText(res), true); return; }
+      $('liveSelect').value = ''; liveMsg('deleted'); return liveLoad();
+    });
+  }));
+  // Status refresh every 6 s while the panel is unlocked.
+  function startLiveRefresh() { if (!liveTimer) liveTimer = setInterval(liveLoad, 6000); }
+
   $('adminUnlock').addEventListener('click', function () {
     var candidate = $('adminKey').value;
     if (!candidate) { setMsg('enter the admin key'); return; }
@@ -1070,6 +1210,7 @@
       if (!res.ok) { KEY = ''; setMsg(errText(res)); return; }
       showPanel();
       renderList(res.data.entries || []);
+      liveLoad(); startLiveRefresh();
     }).catch(function () { KEY = ''; setMsg('server unreachable'); });
   });
   $('adminKey').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('adminUnlock').click(); });
