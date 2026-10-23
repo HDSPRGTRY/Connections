@@ -772,9 +772,9 @@
             </div>
           </div>
           <div class="src-fetch" id="srcFetch">
-            <input type="text" id="srcUrl" placeholder="Raw link to fetch (admin sign-in required)" spellcheck="false">
+            <input type="text" id="srcUrl" placeholder="Raw link to fetch" spellcheck="false">
             <button type="button" id="srcFetchBtn">Fetch link</button>
-            <div class="field-hint" id="srcFetchMsg">Fetch needs admin sign-in: open this page with <b>#admin</b> added to the address and enter your key.</div>
+            <div class="field-hint" id="srcFetchMsg">Paste a raw link (fast-note, Pastefy, GitHub gist or pastebin) and press Fetch link.</div>
           </div>
           <textarea id="src" placeholder="Paste Lua/Luau source here, or choose a file above&hellip;" spellcheck="false"></textarea>
         </div>
@@ -1305,8 +1305,13 @@
     var url = $('srcUrl').value.trim();
     if (!url) { srcMsg('enter a link first', true); return; }
     srcMsg('fetching...');
-    call('POST', '/admin/api/fetch', { url: url }).then(function (res) {
-      if (res.status === 401) { srcMsg('Fetch needs admin sign-in: open this page with #admin added to the address and enter your key.', true); return; }
+    fetch('/api/fetch-source', {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url })
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) { return { ok: r.ok, status: r.status, data: data }; });
+    }).then(function (res) {
       if (!res.ok) { srcMsg((res.data && res.data.error) || ('fetch failed (' + res.status + ')'), true); return; }
       var text = res.data.text || '';
       $('src').value = text;
@@ -1357,7 +1362,6 @@
   }
   function enterPanel() {
     showPanel();
-    srcMsg('');
     $('adminSignOut').hidden = false;
     call('GET', '/admin/api/entries').then(function (res) {
       if (res.ok) renderList(res.data.entries || []);
@@ -1370,7 +1374,6 @@
     $('adminLock').hidden = false;
     $('adminState').textContent = 'locked';
     $('adminSignOut').hidden = true;
-    srcMsg('Fetch needs admin sign-in: open this page with #admin added to the address and enter your key.', true);
     setMsg(message || '');
   }
   // Return visits: if the browser already has a valid admin cookie, open the panel directly.
@@ -1379,7 +1382,6 @@
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (!d || !d.ok) return;
-        srcMsg('');
         if (location.hash === '#admin') enterPanel();
       })
       .catch(function () { /* stay locked */ });
