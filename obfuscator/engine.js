@@ -2034,11 +2034,13 @@ function obfuscate(src, seed, opts) {
   var body = render(bodyToks);
 
   // decoys: random filler strings in the pool, referenced but never used
-  var nd = Math.min(50, Math.max(0, Math.floor(+opts.decoys) || 0));
+  // decoyStrings (from Live) are used verbatim so decoys can match the real link's shape.
+  var given = Array.isArray(opts.decoyStrings) ? opts.decoyStrings : null;
+  var nd = given ? Math.min(80, given.length) : Math.min(80, Math.max(0, Math.floor(+opts.decoys) || 0));
   var decoyStart = POOL.length, di, dj, dstr, cset = ALPHA_L + ALPHA_U + '0123456789';
   for (di = 0; di < nd; di++) {
-    dstr = '';
-    for (dj = 0; dj < 40; dj++) dstr += cset.charAt(rnd(cset.length));
+    if (given) dstr = String(given[di]).slice(0, 200);
+    else { dstr = ''; for (dj = 0; dj < 40; dj++) dstr += cset.charAt(rnd(cset.length)); }
     POOL.push(cryptBytes(utf8bytes(dstr)));
   }
   stats.decoys = nd;
