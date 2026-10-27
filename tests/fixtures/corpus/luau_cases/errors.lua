@@ -1,0 +1,10 @@
+local ok, err = pcall(function() error("boom") end)
+print(ok, err)
+ok, err = pcall(function() error({code = 42}) end)
+print(ok, type(err), err.code)
+ok, err = pcall(function() local x = nil; return x.field end)
+print(ok, string.find(tostring(err), "field") ~= nil)
+print(pcall(error))
+local function risky(n) if n > 2 then error("too big: " .. n, 2) end return n end
+print(pcall(risky, 1), pcall(risky, 5))
+print(xpcall(function() return 1 + 1 end, function(m) return "handled" end))
