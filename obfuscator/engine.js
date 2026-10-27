@@ -3,6 +3,10 @@
  * ES3-style syntax: var only, no arrows, let/const, or template literals.
  *
  * API: obfuscate(source, seed, opts) -> { code, stats }
+ *   opts.singleLine (default false): true emits the generated Lua as one physical line.
+ *     Line numbers in error messages and tracebacks then read 1. Some Luau constructs
+ *     that cannot be rewritten safely are refused with a "single-line output refused" error.
+ *     stats.format is set to "single-line" only in this mode.
  */
 (function (root, factory) {
   var f = factory();
@@ -1118,6 +1122,149 @@ function vmPass(T, rnd, idents) {
 }
 
 // ---------- main ----------
+// Error for input the single-line formatter does not rewrite safely. The message says what
+// to change; the caller never receives multiline output in place of a failed single-line build.
+function slRefuse(detail) {
+  return new Error('single-line output refused: ' + detail + '. Remove or rewrite that construct, or turn singleLine off to keep the multiline output.');
+}
+// Long-bracket opener [=*[ starting at i, as [text, equals]; null if none. ES3-compatible (no sticky regex).
+function longOpenAt(src, i) {
+  var j = i;
+  if (src.charAt(j) !== '[') return null;
+  j++;
+  while (src.charAt(j) === '=') j++;
+  if (src.charAt(j) !== '[') return null;
+  return [src.slice(i, j + 1), src.slice(i + 1, j)];
+}
+// Formatting only: joins the generated Lua onto one physical line. The text is walked with
+// Lua's lexical rules. Only whitespace runs that contain a line break, comments, and line
+// breaks inside string literals change, and each of those changes keeps the same value.
+// Malformed input and constructs this formatter cannot rewrite safely throw instead of
+// producing altered output, so a successful result never contains a raw LF or CR.
+function quoteLuaString(s) {
+  var r = '"', k, ch, code;
+  for (k = 0; k < s.length; k++) {
+    ch = s.charAt(k); code = s.charCodeAt(k);
+    if (ch === '\\') r += '\\\\';
+    else if (ch === '"') r += '\\"';
+    else if (ch === '\n') r += '\\n';
+    else if (ch === '\r') r += '\\r';
+    else if (code < 32 || code === 127) r += '\\' + ('00' + code).slice(-3);
+    else r += ch;
+  }
+  return r + '"';
+}
+function toSingleLine(src) {
+  var WS = ' \t\r\n\v\f';
+  var out = '', i = 0, j, k, n = src.length, c, ch, nx, m, close, raw, body, end, run, depth, q;
+  if (src.charAt(0) === '#') throw slRefuse('a leading shebang line is not supported');
+  if (src.indexOf('\0') >= 0) throw slRefuse('raw NUL bytes are not supported');
+  while (i < n) {
+    c = src.charAt(i);
+    if (c === '"' || c === "'") {
+      out += c; j = i + 1;
+      for (;;) {
+        if (j >= n) throw slRefuse('unterminated string literal at offset ' + i);
+        ch = src.charAt(j);
+        if (ch === c) { out += c; j++; break; }
+        if (ch === '\n' || ch === '\r') throw slRefuse('raw line break inside a quoted string at offset ' + j);
+        if (ch === '\\') {
+          nx = src.charAt(j + 1);
+          if (nx === '') throw slRefuse('unterminated string literal at offset ' + i);
+          if (nx === '\r') { out += '\\n'; j += src.charAt(j + 2) === '\n' ? 3 : 2; continue; }
+          if (nx === '\n') { out += '\\n'; j += src.charAt(j + 2) === '\r' ? 3 : 2; continue; }
+          if (nx === 'z') {
+            out += '\\z'; j += 2;
+            while (j < n && WS.indexOf(src.charAt(j)) >= 0) j++;
+            continue;
+          }
+          out += ch + nx; j += 2; continue;
+        }
+        out += ch; j++;
+      }
+      i = j; continue;
+    }
+    if (c === '[') {
+      m = longOpenAt(src, i);
+      if (m) {
+        close = ']' + m[1] + ']';
+        j = src.indexOf(close, i + m[0].length);
+        if (j < 0) throw slRefuse('unterminated long string at offset ' + i);
+        raw = src.slice(i + m[0].length, j);
+        end = j + close.length;
+        if (!/[\r\n]/.test(raw)) { out += src.slice(i, end); }
+        else {
+          body = raw.replace(/\r\n/g, '\n');
+          if (body.charAt(0) === '\n') body = body.slice(1);
+          out += quoteLuaString(body);
+        }
+        i = end; continue;
+      }
+    }
+    if (c === '`') {
+      // Interpolated string. Text segments may not contain line breaks. Inside {...} the
+      // expression is scanned conservatively: quoted strings are copied, and nested
+      // backtick strings, long brackets, and comments inside braces are refused.
+      j = i + 1; depth = 0;
+      for (;;) {
+        if (j >= n) throw slRefuse('unterminated interpolated string at offset ' + i);
+        ch = src.charAt(j);
+        if (depth === 0) {
+          if (ch === '`') break;
+          if (ch === '\n' || ch === '\r') throw slRefuse('interpolated string spans lines (not supported) at offset ' + j);
+          if (ch === '\\') {
+            nx = src.charAt(j + 1);
+            if (nx === '\n' || nx === '\r') throw slRefuse('interpolated string spans lines (not supported) at offset ' + j);
+            j += 2; continue;
+          }
+          if (ch === '{') depth = 1;
+          j++; continue;
+        }
+        if (ch === '\n' || ch === '\r') throw slRefuse('line break inside an interpolation at offset ' + j);
+        if (ch === '"' || ch === "'") {
+          q = ch; j++;
+          for (;;) {
+            if (j >= n) throw slRefuse('unterminated string in interpolation at offset ' + j);
+            ch = src.charAt(j);
+            if (ch === q) { j++; break; }
+            if (ch === '\n' || ch === '\r') throw slRefuse('raw line break inside an interpolation at offset ' + j);
+            j += ch === '\\' ? 2 : 1;
+          }
+          continue;
+        }
+        if (ch === '`') throw slRefuse('nested interpolated string (not supported) at offset ' + j);
+        if (ch === '[' && /^\[=*\[/.test(src.slice(j, j + 64))) throw slRefuse('long bracket inside an interpolation (not supported) at offset ' + j);
+        if (ch === '-' && src.charAt(j + 1) === '-') throw slRefuse('comment inside an interpolation (not supported) at offset ' + j);
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        j++;
+      }
+      out += src.slice(i, j + 1); i = j + 1; continue;
+    }
+    if (c === '-' && src.charAt(i + 1) === '-') {
+      m = longOpenAt(src, i + 2);
+      if (m) {
+        close = ']' + m[1] + ']';
+        j = src.indexOf(close, i + 2 + m[0].length);
+        if (j < 0) throw slRefuse('unterminated long comment at offset ' + i);
+        out += ' '; i = j + close.length; continue;
+      }
+      j = i + 2;
+      while (j < n && src.charAt(j) !== '\n' && src.charAt(j) !== '\r') j++;
+      out += ' '; i = j; continue;
+    }
+    if (WS.indexOf(c) >= 0) {
+      j = i;
+      while (j < n && WS.indexOf(src.charAt(j)) >= 0) j++;
+      run = src.slice(i, j);
+      out += /[\r\n]/.test(run) ? ' ' : run;
+      i = j; continue;
+    }
+    out += c; i++;
+  }
+  return out;
+}
+
 function obfuscate(src, seed, opts) {
   opts = opts || {};
   var profile = String(opts.profile || 'medium').toLowerCase();
@@ -2067,6 +2214,10 @@ function obfuscate(src, seed, opts) {
   stats.density = density;
   stats.cff = doCff;
 
+  if (opts.singleLine === true) {
+    code = toSingleLine(code);
+    stats.format = 'single-line';
+  }
   return { code: code, stats: stats };
 }
 
