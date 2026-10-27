@@ -702,6 +702,8 @@
           </div>
           <label class="switch"><input type="checkbox" id="optVm"><span class="track"></span>VM layer</label>
           <div class="field-hint">The VM layer compiles supported functions to bytecode. Maximum enables it by default; untick it here to turn it off. Functions outside the supported subset are left unchanged. Error messages in the output differ from the original.</div>
+          <label class="switch"><input type="checkbox" id="optSingleLine"><span class="track"></span>Single-line output</label>
+          <div class="field-hint">Puts the whole output on one line, with comments removed and line breaks replaced by spaces or escapes. Line numbers in error messages then all read 1. Off keeps the normal multi-line output. If a script uses a construct that cannot be made single-line safely, the run stops with an error and the output is not produced.</div>
         </div>
       </details>
 
@@ -963,7 +965,7 @@
       if (el) out[ids[i]] = el.value;
     }
     var checks = ['optRename', 'optStrings', 'optNumbers', 'optAntiDebug',
-      'optFresh', 'optRemember', 'optVm'];
+      'optFresh', 'optRemember', 'optVm', 'optSingleLine'];
     for (i = 0; i < checks.length; i++) {
       el = document.getElementById(checks[i]);
       if (el) out[checks[i]] = el.checked ? 1 : 0;
@@ -1037,6 +1039,7 @@
           decoys: parseInt(document.getElementById('optDecoys').value, 10) || 0,
           profile: document.getElementById('optProfile').value,
           vm: document.getElementById('optVm').checked,
+          singleLine: document.getElementById('optSingleLine').checked,
         }));
         dst.value = res.code;
         updateCounts();
