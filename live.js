@@ -8,6 +8,21 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PROFILES = ['light', 'medium', 'heavy', 'maximum'];
+
+// Output size rule. The 1 MiB limit applies to the exact text this server stores and serves as the
+// artifact. That text is the engine output alone: no harness prelude is added (the 42-byte getgenv line
+// exists only in the Luau test harness). The length is the UTF-8 byte length of the stored text, the
+// same bytes writeFileSync writes and the server returns. Oversized output is rejected, never truncated,
+// and no weaker obfuscation is retried.
+const OUTPUT_LIMIT_BYTES = 1048576;
+function outputBytes(code) { return Buffer.byteLength(code, 'utf8'); }
+function checkOutputSize(code) {
+    const n = outputBytes(code);
+    if (n > OUTPUT_LIMIT_BYTES) {
+        throw new Error('output exceeds the 1 MiB limit: ' + n + ' bytes, limit ' + OUTPUT_LIMIT_BYTES + ' bytes (rejected, not stored)');
+    }
+}
+
 const LIMITS = {
     maxScripts: 20,
     maxGenerations: 5,          // artifacts kept per script (current included)
@@ -17,7 +32,7 @@ const LIMITS = {
     minRotateMs: 1000,          // token rotation: 0 = off, otherwise 1 s to 24 h
     maxRotateMs: 24 * 60 * 60 * 1000,
     maxTtlMs: 7 * 24 * 60 * 60 * 1000,
-    maxOutputBytes: 8 * 1024 * 1024,
+    maxOutputBytes: OUTPUT_LIMIT_BYTES,
     maxNameLen: 60
 };
 const CLEANUP_MS = 60 * 1000;
@@ -45,7 +60,7 @@ function tokenOk(given, expected) {
 // placeholder ("undefined"/"NaN") leaked into the code as an identifier.
 function validateOutput(internals, code) {
     if (typeof code !== 'string' || code.length === 0) throw new Error('obfuscator returned empty output');
-    if (Buffer.byteLength(code, 'utf8') > LIMITS.maxOutputBytes) throw new Error('output exceeds size limit');
+    checkOutputSize(code);
     const toks = internals.tokenize(code);            // throws on lexer failure
     if (!Array.isArray(toks) || toks.length === 0) throw new Error('output produced no tokens');
     let depth = 0, pendingLoopDo = 0;
@@ -662,4 +677,4 @@ function mountLiveRoutes(app, live, requireAdmin) {
     });
 }
 
-module.exports = { createLive, mountLiveRoutes, validateOutput, validateConfig, checkSource, LIMITS, PROFILES, tokenOk };
+module.exports = { createLive, mountLiveRoutes, validateOutput, validateConfig, checkSource, LIMITS, PROFILES, tokenOk, checkOutputSize, outputBytes, OUTPUT_LIMIT_BYTES };
