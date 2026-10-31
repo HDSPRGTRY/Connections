@@ -909,7 +909,7 @@ function vmCompileBody(params, toks, all, isVararg, reg) {
   top = params.length + 1;
   stmts(body);
   emit('RET0');
-  return { code: code, consts: consts };
+  return { code: code, consts: consts, np: params.length };
 }
 
 // Interpreter source. Opcode numbers come from the per-build permutation.
@@ -948,12 +948,12 @@ function vmInterp(ids, nm) {
     ['RETN', 'return ' + nm.u + '(R, a, a + b - 1)'],
     ['SETALL', 'R[a] = {' + nm.u + '(R[b], 1, R[b].n)}'],
     ['APPEND', 'local p, t = R[b], R[a]; for i = 1, p.n do t[c + i - 1] = p[i] end'],
-    ['CLOSURE', 'local F, D2 = c, ' + nm.d + '[b]; R[a] = function(...) local va; if F % 2 == 1 then va = ' + nm.v + '((F - 1) // 2, ...) end; return ' + nm.x + '(D2, va, ...) end'],
+    ['CLOSURE', 'local F, D2 = c, ' + nm.d + '[b]; if ' + nm.x + 'gT' + '(D2) ~= "table" then ' + nm.x + 'gE' + '("vm: invalid closure record") end; R[a] = function(...) local va; if F % 2 == 1 then va = ' + nm.v + '((F - 1) // 2, ...) end; return ' + nm.x + '(D2, va, ...) end'],
     ['VARG', 'R[a] = va[1]'],
     ['VARGP', 'R[a] = va'],
     ['RETM', 'local p, t = R[a + b - 1], {}; for i = 1, b - 1 do t[i] = R[a + i - 1] end; for i = 1, p.n do t[b - 1 + i] = p[i] end; return ' + nm.u + '(t, 1, b - 1 + p.n)'],
     ['RET0', 'return'],
-    ['FORPREP', "local i, l, s = R[a], R[a + 1], R[a + 2]; if s == 0 then error(\"'for' step is zero\") end; " +
+    ['FORPREP', "local i, l, s = R[a], R[a + 1], R[a + 2]; if s == 0 then " + nm.x + 'gE' + "(\"'for' step is zero\") end; " +
                 'if (s > 0 and i <= l) or (s < 0 and i >= l) then R[a + 3] = i else pc = c end'],
     ['FORSTEP', 'local i = R[a] + R[a + 2]; R[a] = i; local l, s = R[a + 1], R[a + 2]; ' +
                 'if (s > 0 and i <= l) or (s < 0 and i >= l) then R[a + 3] = i; pc = b end']
@@ -963,20 +963,18 @@ function vmInterp(ids, nm) {
   }).join('\n');
   return [
     'local ' + nm.u + ' = table.unpack or unpack',
+    vmVerifierLua(nm, ids, {capture: true, validate: true, flow: true}),
     'local function ' + nm.x + '(D, va, ...)',
-    'local C, K = D[1], D[2]',
-    'if not D[4] then',
-    'local s = 0',
-    'for i = 1, #C do s = (s * 31 + C[i]) % 2147483647 end',
-    'if s ~= D[3] then error("integrity check failed") end',
-    'D[4] = true',
-    'end',
+    'local S = ' + nm.x + 'W[D]',
+    'if not S then local c, k = ' + nm.x + 'N(D, true); S = {c, k}; ' + nm.x + 'W[D] = S end',
+    'local C, K = S[1], S[2]',
     'local R = {...}',
     'local pc, op, a, b, c = 1, 0, 0, 0, 0',
     'while true do',
     'op, a, b, c = C[pc], C[pc + 1], C[pc + 2], C[pc + 3]',
     'pc = pc + 4',
     chain,
+    'else ' + nm.x + 'gE' + '("vm: invalid opcode " .. ' + nm.x + 'gS' + '(op))',
     'end',
     'end',
     'end'
@@ -1020,17 +1018,577 @@ function fnHeader(T, i) {
   return { open: open, close: close, params: params, vararg: vararg };
 }
 
-// Checksum of the mapped bytecode; the interpreter recomputes it on first use.
-function vmChecksum(code, ids) {
-  var s = 0, i, v;
+// Checksum of the mapped bytecode, the frame size M, the parameter count np and the constant pool (r26).
+// The interpreter recomputes exactly this value from its own tables: bytecode values, then the constant count,
+// then each constant as (type tag, byte length, bytes). Numbers are hashed as string.format("%.17g", v).
+// ES3 style, no Node-only APIs (the engine also runs in the browser).
+function vmChecksum(code, ids, consts, M, np) {
+  var MOD = 2147483647, s = 0, i, v, items, k, it, j;
   for (i = 0; i < code.length; i++) {
     v = (i % 4 === 0) ? ids[code[i]] : code[i];
-    s = (s * 31 + v) % 2147483647;
+    s = (s * 31 + v) % MOD;
+  }
+  s = (s * 31 + M) % MOD;
+  s = (s * 31 + np) % MOD;
+  items = vmConstItems(consts || []);
+  s = (s * 31 + items.length) % MOD;
+  for (k = 0; k < items.length; k++) {
+    it = items[k];
+    if (it.t === 'b') { s = (s * 31 + (it.v ? 4 : 5)) % MOD; continue; }
+    s = (s * 31 + (it.t === 'n' ? 2 : 1)) % MOD;
+    s = (s * 31 + it.b.length) % MOD;
+    for (j = 0; j < it.b.length; j++) s = (s * 31 + it.b[j]) % MOD;
   }
   return s;
 }
 
+// Canonical constant items for the checksum. Unsupported literals throw, which makes the function a clean skip.
+function vmConstItems(consts) {
+  var out = [], k, tk;
+  for (k = 0; k < consts.length; k++) {
+    tk = consts[k];
+    if (tk[0] === 'NUM') out.push({ t: 'n', b: vmAsciiBytes(vmFmtG17(vmNumValue(tk[1]))) });
+    else if (tk[0] === 'STR') out.push({ t: 's', b: vmLitBytes(tk[1]) });
+    else if (tk[0] === 'LSTR') out.push({ t: 's', b: vmLongBytes(tk[1], tk[2]) });
+    else if (tk[0] === 'KW' && (tk[1] === 'true' || tk[1] === 'false')) out.push({ t: 'b', v: tk[1] === 'true' });
+    else vmFail('unsupported constant ' + tk[0]);
+  }
+  return out;
+}
+
+function vmAsciiBytes(str) {
+  var out = [], i;
+  for (i = 0; i < str.length; i++) out.push(str.charCodeAt(i));
+  return out;
+}
+
+function vmUtf8Bytes(cp, out) {
+  if (cp < 0x80) out.push(cp);
+  else if (cp < 0x800) out.push(0xC0 | (cp >> 6), 0x80 | (cp & 63));
+  else if (cp < 0x10000) out.push(0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+  else out.push(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+  return out;
+}
+
+// UTF-16 text -> UTF-8 bytes (the bytes the generated Lua source carries).
+function vmStrBytes(str, out) {
+  var i, c, d;
+  for (i = 0; i < str.length; i++) {
+    c = str.charCodeAt(i);
+    if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length) {
+      d = str.charCodeAt(i + 1);
+      if (d >= 0xDC00 && d <= 0xDFFF) { c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00); i++; }
+    }
+    vmUtf8Bytes(c, out);
+  }
+  return out;
+}
+
+var VM_STR_ESC = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '\\': 92, '"': 34, "'": 39 };
+
+// Bytes of a quoted Lua string literal (token text including its quotes). Decodes the escapes Lua 5.1/Luau allow.
+function vmLitBytes(lit) {
+  var s = lit.slice(1, -1), out = [], i = 0, j, e, m, n, digits, cp;
+  while (i < s.length) {
+    j = s.indexOf('\\', i);
+    if (j < 0) j = s.length;
+    vmStrBytes(s.slice(i, j), out);
+    i = j;
+    if (i >= s.length) break;
+    e = s.charAt(i + 1);
+    i += 2;
+    if (has(VM_STR_ESC, e)) out.push(VM_STR_ESC[e]);
+    else if (e === '\n') out.push(10);
+    else if (e === '\r') { out.push(10); if (s.charAt(i) === '\n') i++; }
+    else if (e >= '0' && e <= '9') {
+      digits = e;
+      while (digits.length < 3 && s.charAt(i) >= '0' && s.charAt(i) <= '9') { digits += s.charAt(i); i++; }
+      n = +digits;
+      if (n > 255) vmFail('decimal escape out of range');
+      out.push(n);
+    }
+    else if (e === 'x') {
+      m = s.substr(i, 2);
+      if (!/^[0-9a-fA-F]{2}$/.test(m)) vmFail('bad hex escape');
+      out.push(parseInt(m, 16));
+      i += 2;
+    }
+    else if (e === 'z') { while (i < s.length && /\s/.test(s.charAt(i))) i++; }
+    else if (e === 'u') {
+      m = /^\{([0-9a-fA-F]+)\}/.exec(s.slice(i));
+      if (!m) vmFail('bad unicode escape');
+      cp = parseInt(m[1], 16);
+      if (cp >= 0x110000) vmFail('unicode escape out of range');
+      vmUtf8Bytes(cp, out);
+      i += m[0].length;
+    }
+    else vmFail('unsupported escape');
+  }
+  return out;
+}
+
+// Bytes of a long-bracket string token [==[ ... ]==]. The first newline directly after the opening bracket is skipped.
+function vmLongBytes(lit, eq) {
+  var body = lit.slice(eq.length + 2, lit.length - eq.length - 2);
+  if (body.slice(0, 2) === '\r\n' || body.slice(0, 2) === '\n\r') body = body.slice(2);
+  else if (body.charAt(0) === '\n' || body.charAt(0) === '\r') body = body.slice(1);
+  return vmStrBytes(body, []);
+}
+
+// Value of a Lua numeric literal token (underscores allowed, as in Luau).
+function vmNumValue(text) {
+  var t = text.replace(/_/g, ''), v, i;
+  if (/^0[xX]/.test(t)) { v = 0; for (i = 2; i < t.length; i++) v = v * 16 + parseInt(t.charAt(i), 16); }
+  else if (/^0[bB]/.test(t)) { v = 0; for (i = 2; i < t.length; i++) v = v * 2 + (t.charAt(i) === '1' ? 1 : 0); }
+  else v = Number(t);
+  if (v !== v) vmFail('bad number ' + text);
+  return v;
+}
+
+// Same text as C printf("%.17g") (what Lua's string.format("%.17g", v) produces).
+function vmFmtG17(v) {
+  var e, mant, X, digits, out, md, ms, frac, neg, z;
+  if (v !== v) return 'nan';
+  if (v === Infinity) return 'inf';
+  if (v === -Infinity) return '-inf';
+  if (v === 0) return (1 / v < 0) ? '-0' : '0';
+  neg = v < 0;
+  if (neg) v = -v;
+  e = v.toExponential(16);
+  mant = e.split('e')[0];
+  X = parseInt(e.split('e')[1], 10);
+  digits = mant.split('.').join('');
+  if (X < -4 || X >= 17) {
+    md = digits.replace(/0+$/, '');
+    ms = md.length > 1 ? md.charAt(0) + '.' + md.slice(1) : md;
+    out = ms + 'e' + (X < 0 ? '-' : '+') + (Math.abs(X) < 10 ? '0' : '') + Math.abs(X);
+  } else if (X >= 0) {
+    frac = digits.slice(X + 1).replace(/0+$/, '');
+    out = digits.slice(0, X + 1) + (frac ? '.' + frac : '');
+  } else {
+    z = ''; for (var k = 0; k < -X - 1; k++) z += '0';
+    frac = (z + digits).replace(/0+$/, '');
+    out = '0' + (frac ? '.' + frac : '');
+  }
+  return (neg ? '-' : '') + out;
+}
+
+// r26 verifier snippets. ES3 only: no Object.keys, no Array.prototype.map/forEach/indexOf, no let/const, no arrows.
+// The file is part of the shipped engine text, so every helper here runs in the browser too.
+//
+// Record: { code, consts, digest, M, np }
+//   np  number of parameters. The call protocol fills registers 1..np before the first instruction.
+//   M   frame size declared by the compiler. It must equal the bound derived from the code and np (see vmRegBound).
+//
+// Operand kinds per opcode (VM_SPEC), one table for the build side and the Lua verifier.
+//   r register (1 <= r)           k constant index (1 <= k <= #K)     s constant index that must be a string
+//   t jump target: instruction start, 1 <= t <= #C + 1               n non-negative count
+//   d closure record index        - unused
+// Fourth character: implicit register extent (S = a+1, F = a+3, B = a+b, P = a+b+1, R = a+b-1, - none).
+var VM_SPEC = {
+  MOVE: 'rr--', LOADK: 'rk--', LOADNIL: 'r---', GETG: 'rs--', SETG: 'rs--', GETT: 'rrr-', SETT: 'rrr-',
+  SELF: 'rrsS', TABLE: 'r---', ADD: 'rrr-', SUB: 'rrr-', MUL: 'rrr-', DIV: 'rrr-', IDIV: 'rrr-', MOD: 'rrr-',
+  POW: 'rrr-', CONCAT: 'rrr-', EQ: 'rrr-', LT: 'rrr-', LE: 'rrr-', UNM: 'rr--', NOT: 'rr--', LEN: 'rr--',
+  JMP: 't---', JF: 'rt--', JT: 'rt--', CALL: 'rn-B', CALLP: 'rn-B', CALLM: 'rn-P', CALLMP: 'rn-P',
+  RETN: 'rn-R', RETM: 'rn-R', RET0: '----', FORPREP: 'r-tF', FORSTEP: 'rt-F', APPEND: 'rrn-', SETALL: 'rr--',
+  VARG: 'r---', VARGP: 'r---', CLOSURE: 'rdn-'
+};
+
+// Register reads and writes, derived from the interpreter (vmInterp). Readable form; the Lua side gets the
+// numeric encoding built by vmFlowTableLua.
+//   rd   operands read on every path: 'a', 'b', 'c'
+//   range  registers read in [a + lo, a + hi + (b if bu)], inclusive (bu = 1 when the upper end is a + b + hi)
+//   wf   registers written on the fall-through edge, as offsets from a
+//   wj   registers written on the jump edge, as offsets from a
+//   tj   operand that holds the jump target; ft false when the instruction never falls through
+var VM_FLOW = {
+  MOVE: { rd: ['b'], wf: [0] },
+  LOADK: { wf: [0] },
+  LOADNIL: { wf: [0] },
+  GETG: { wf: [0] },
+  SETG: { rd: ['a'] },
+  GETT: { rd: ['b', 'c'], wf: [0] },
+  SETT: { rd: ['a', 'b', 'c'] },
+  SELF: { rd: ['b'], wf: [0, 1] },
+  TABLE: { wf: [0] },
+  ADD: { rd: ['b', 'c'], wf: [0] },
+  SUB: { rd: ['b', 'c'], wf: [0] },
+  MUL: { rd: ['b', 'c'], wf: [0] },
+  DIV: { rd: ['b', 'c'], wf: [0] },
+  IDIV: { rd: ['b', 'c'], wf: [0] },
+  MOD: { rd: ['b', 'c'], wf: [0] },
+  POW: { rd: ['b', 'c'], wf: [0] },
+  CONCAT: { rd: ['b', 'c'], wf: [0] },
+  EQ: { rd: ['b', 'c'], wf: [0] },
+  LT: { rd: ['b', 'c'], wf: [0] },
+  LE: { rd: ['b', 'c'], wf: [0] },
+  UNM: { rd: ['b'], wf: [0] },
+  NOT: { rd: ['b'], wf: [0] },
+  LEN: { rd: ['b'], wf: [0] },
+  JMP: { ft: false, tj: 'a' },
+  JF: { rd: ['a'], tj: 'b' },
+  JT: { rd: ['a'], tj: 'b' },
+  CALL: { rd: ['a'], range: { lo: 1, hi: 0, bu: 1 }, wf: [0] },
+  CALLP: { rd: ['a'], range: { lo: 1, hi: 0, bu: 1 }, wf: [0] },
+  CALLM: { rd: ['a'], range: { lo: 1, hi: 1, bu: 1 }, wf: [0] },
+  CALLMP: { rd: ['a'], range: { lo: 1, hi: 1, bu: 1 }, wf: [0] },
+  RETN: { range: { lo: 0, hi: -1, bu: 1 }, ft: false },
+  RETM: { range: { lo: 0, hi: -1, bu: 1 }, ft: false },
+  RET0: { ft: false },
+  SETALL: { rd: ['b'], wf: [0] },
+  APPEND: { rd: ['a', 'b'] },
+  CLOSURE: { wf: [0] },
+  VARG: { wf: [0] },
+  VARGP: { wf: [0] },
+  FORPREP: { range: { lo: 0, hi: 2, bu: 0 }, wf: [3], tj: 'c' },
+  FORSTEP: { range: { lo: 0, hi: 2, bu: 0 }, wf: [0], tj: 'b', wj: [0, 3] }
+};
+
+// Smallest frame size consistent with the code: the parameters, plus every register an operand or implicit extent names.
+function vmRegBound(code, np) {
+  var M = np > 1 ? np : 1, p, sp, vals, j, ext, top, a, b;
+  for (p = 0; p < code.length; p += 4) {
+    if (!has(VM_SPEC, code[p])) vmFail('unknown opcode in register bound');
+    sp = VM_SPEC[code[p]];
+    vals = [code[p + 1], code[p + 2], code[p + 3]];
+    for (j = 0; j < 3; j++) if (sp.charAt(j) === 'r' && vals[j] > M) M = vals[j];
+    a = vals[0]; b = vals[1]; top = null;
+    ext = sp.charAt(3);
+    if (ext === 'S') top = a + 1;
+    else if (ext === 'F') top = a + 3;
+    else if (ext === 'B') top = a + b;
+    else if (ext === 'P') top = a + b + 1;
+    else if (ext === 'R') top = a + b - 1;
+    if (top !== null && top > M) M = top;
+  }
+  return M;
+}
+
+// Numeric operand table for the Lua verifier: one row per opcode id, {kind1, kind2, kind3, extent}.
+// Kinds: 0 unused, 1 register, 2 constant index, 3 string constant, 4 jump target, 5 count, 6 closure record.
+// Extents: 0 none, 1 a+1, 2 a+3, 3 a+b, 4 a+b+1, 5 a+b-1. Numbers only: string literals are costly in the output.
+var VM_KIND = { '-': 0, 'r': 1, 'k': 2, 's': 3, 't': 4, 'n': 5, 'd': 6 };
+var VM_EXT = { '-': 0, 'S': 1, 'F': 2, 'B': 3, 'P': 4, 'R': 5 };
+// True when the ids of the given names are exactly 1..N (N = number of names), each used once (see verifierCompact).
+function vmIdsDense(ids, names) {
+  var i, seen = {}, m = 0;
+  for (i = 0; i < names.length; i++) {
+    if (!has(ids, names[i])) return false;
+    if (seen[ids[names[i]]]) return false;
+    seen[ids[names[i]]] = true;
+    if (ids[names[i]] > m) m = ids[names[i]];
+  }
+  if (m !== names.length) return false;
+  for (i = 1; i <= m; i++) if (!seen[i]) return false;
+  return true;
+}
+function vmSpecLua(ids) {
+  var rows = [], parts = [], i, name, sp, specNames = [], k;
+  for (k in VM_SPEC) if (has(VM_SPEC, k)) specNames.push(k);
+  var pos = vmIdsDense(ids, specNames);
+  for (i = 0; i < specNames.length; i++) {
+    name = specNames[i];
+    sp = VM_SPEC[name];
+    rows[ids[name]] = '{' + VM_KIND[sp.charAt(0)] + ',' + VM_KIND[sp.charAt(1)] + ',' + VM_KIND[sp.charAt(2)] + ',' + VM_EXT[sp.charAt(3)] + '}';
+  }
+  for (i = 1; i < rows.length; i++) if (rows[i] !== undefined) parts.push((pos ? '' : '[' + i + ']=') + rows[i]);
+  return '{' + parts.join(',') + '}';
+}
+
+// Numeric flow table for the Lua verifier, one row per opcode id:
+//   { readMask, fallWriteMask, jumpWriteMask, targetOperand, fallsThrough, rangeLo, rangeHi, rangeBU }
+// readMask: 1 = a, 2 = b, 4 = c.  writeMask: 1 = a, 2 = a+1, 4 = a+3.  targetOperand: 0 none, 1 a, 2 b, 3 c.
+// rangeBU is -1 when there is no range. The Lua decoder (vmFlowLua) reads only these rows.
+function vmFlowTableLua(ids) {
+  var rows = [], parts = [], i, name, spec, rm, fm, jm, t, rb, k, x, pos = vmIdsDense(ids, VM_OPS);
+  for (i = 0; i < VM_OPS.length; i++) {
+    name = VM_OPS[i];
+    if (!has(VM_FLOW, name)) vmFail('no flow rule for ' + name);
+    spec = VM_FLOW[name];
+    rm = 0;
+    for (k = 0; spec.rd && k < spec.rd.length; k++) {
+      x = spec.rd[k];
+      rm += x === 'a' ? 1 : x === 'b' ? 2 : 4;
+    }
+    fm = 0;
+    for (k = 0; spec.wf && k < spec.wf.length; k++) fm += spec.wf[k] === 0 ? 1 : spec.wf[k] === 1 ? 2 : 4;
+    jm = 0;
+    for (k = 0; spec.wj && k < spec.wj.length; k++) jm += spec.wj[k] === 0 ? 1 : spec.wj[k] === 1 ? 2 : 4;
+    t = spec.tj === undefined ? 0 : spec.tj === 'a' ? 1 : spec.tj === 'b' ? 2 : 3;
+    if (spec.range && spec.range.lo > 3) vmFail('range offset');
+    rb = spec.range ? spec.range.bu : -1;
+    rows[ids[name]] = '{' + rm + ',' + fm + ',' + jm + ',' + t + ',' + (spec.ft === false ? 0 : 1) + ',' +
+      (spec.range ? spec.range.lo : 0) + ',' + (spec.range ? spec.range.hi : 0) + ',' + rb + '}';
+  }
+  for (i = 1; i < rows.length; i++) if (rows[i] !== undefined) parts.push((pos ? '' : '[' + i + ']=') + rows[i]);
+  return '{' + parts.join(',') + '}';
+}
+
+// Error codes returned by the verifier as "vm:<code>". The names are for readers and for the tests.
+var VM_ERR = [
+  '', 'malformed bytecode', 'malformed operand', 'register out of range', 'constant index out of range',
+  'string constant expected', 'invalid jump target', 'negative count', 'invalid closure record',
+  'register bound mismatch', 'register bound too large', 'malformed record', 'record has a metatable',
+  'malformed register bound', 'integrity check failed', 'control falls off the end', 'register read before write',
+  'invalid opcode'
+];
+function vmErrCode(name) {
+  var k;
+  for (k = 1; k < VM_ERR.length; k++) if (VM_ERR[k] === name) return k;
+  vmFail('unknown verifier error ' + name);
+}
+
+// Lua verifier. Placeholders: @K@ = alias of built-in K (captured local, or the global itself),
+// {{NAME}} = chunk-local name of a verifier function. Returns Lua text only.
+//
+// Order inside NN: shape, metatables, digest, structure, flow. The digest comes first so a stale record fails cheaply.
+// Structure derives the frame size and checks every operand. Flow is a definite-assignment analysis over the control
+// flow graph: no register may be read on a path where it was not written (parameters count as written at entry).
+function vmVerifierLua(nm, ids, flags) {
+  var X = nm.x, base = {}, al = {}, keys = ['E', 'T', 'F', 'B', 'S', 'M', 'W', 'U', 'L', 'A', 'G', 'P'], names = {}, lines = [], text, i, k;
+  var E = function (name) { return '@E@("vm:' + vmErrCode(name) + '")'; };
+  base.E = 'error'; base.T = 'type'; base.F = 'string.format'; base.B = 'string.byte'; base.S = 'tostring';
+  base.M = 'math.floor'; base.W = 'setmetatable'; base.U = 'string.sub'; base.L = 'rawlen'; base.A = 'rawget';
+  base.G = 'getmetatable'; base.P = 'pairs';
+  for (i = 0; i < keys.length; i++) {
+    k = keys[i];
+    al[k] = flags.capture ? X + 'g' + k : base[k];
+  }
+  names.VN = X + 'V'; names.QN = X + 'Q'; names.NN = X + 'N'; names.WN = X + 'W'; names.SP = X + 'S';
+  names.FL = X + 'L'; names.ST = X + 'Z'; names.FN = X + 'Y';
+
+  if (flags.capture) {
+    var capL = [], capR = [];
+    for (i = 0; i < keys.length; i++) { capL.push(al[keys[i]]); capR.push(base[keys[i]]); }
+    lines.push('local ' + capL.join(', ') + ' = ' + capR.join(', '));
+  }
+
+  lines.push('local {{WN}} = @W@({}, {__mode = "k"})');
+  if (flags.validate) lines.push('local {{SP}} = ' + vmSpecLua(ids));
+
+  // digest: code values, M, np, #K, then the constants (same order as vmChecksum in checksum26.js)
+  lines.push([
+    'local function {{VN}}(C, K, M, np, n, nk)',
+    '  if @T@(M) ~= "number" or @T@(np) ~= "number" then return nil end',
+    '  local s = 0',
+    '  for i = 1, n do local v = @A@(C, i); if @T@(v) ~= "number" then return nil end; s = (s * 31 + v) % 2147483647 end',
+    '  s = (s * 31 + M) % 2147483647',
+    '  s = (s * 31 + np) % 2147483647',
+    '  s = (s * 31 + nk) % 2147483647',
+    '  for i = 1, nk do',
+    '    local v = @A@(K, i)',
+    '    if @T@(v) == "string" then',
+    '      s = (s * 31 + 1) % 2147483647',
+    '      s = (s * 31 + #v) % 2147483647',
+    '      for j = 1, #v do s = (s * 31 + @B@(v, j)) % 2147483647 end',
+    '    elseif @T@(v) == "number" then',
+    '      local t = @F@("%.17g", v)',
+    '      s = (s * 31 + 2) % 2147483647',
+    '      s = (s * 31 + #t) % 2147483647',
+    '      for j = 1, #t do s = (s * 31 + @B@(t, j)) % 2147483647 end',
+    '    elseif v == true then s = (s * 31 + 4) % 2147483647',
+    '    elseif v == false then s = (s * 31 + 5) % 2147483647',
+    '    else return nil end',
+    '  end',
+    '  return s',
+    'end'
+  ].join('\n'));
+
+  // structure: operand kinds, jump targets, closure records, and the frame size derived from the code
+  if (flags.validate) lines.push([
+    'local function {{QN}}(C, K, n, M, np)',
+    '  if n < 4 or n % 4 ~= 0 then ' + E('malformed bytecode') + ' end',
+    '  local nk = @L@(K)',
+    '  local bound = np',
+    '  if bound < 1 then bound = 1 end',
+    '  for p = 1, n, 4 do',
+    '    local op = @A@(C, p)',
+    '    local sp = {{SP}}[op]',
+    '    if sp == nil then ' + E('invalid opcode') + ' end',
+    '    local a, b, c = @A@(C, p + 1), @A@(C, p + 2), @A@(C, p + 3)',
+    '    local vals = {a, b, c}',
+    '    for j = 1, 3 do',
+    '      local kind = sp[j]',
+    '      local v = vals[j]',
+    '      if kind ~= 0 then',
+    '        if @T@(v) ~= "number" or v ~= v or v > 2147483647 or v < -2147483647 or v ~= @M@(v) then ' + E('malformed operand') + ' end',
+    '        if kind == 1 then',
+    '          if v < 1 then ' + E('register out of range') + ' end',
+    '          if v > bound then bound = v end',
+    '        elseif kind == 2 then if v < 1 or v > nk then ' + E('constant index out of range') + ' end',
+    '        elseif kind == 3 then if v < 1 or v > nk or @T@(@A@(K, v)) ~= "string" then ' + E('string constant expected') + ' end',
+    '        elseif kind == 4 then if v < 1 or v > n + 1 or (v - 1) % 4 ~= 0 then ' + E('invalid jump target') + ' end',
+    '        elseif kind == 5 then if v < 0 then ' + E('negative count') + ' end',
+    '        elseif kind == 6 then if v < 1 then ' + E('invalid closure record') + ' end',
+    '        end',
+    '      end',
+    '    end',
+    '    local ext = sp[4]',
+    '    local top = nil',
+    '    if ext == 1 then top = a + 1 elseif ext == 2 then top = a + 3 elseif ext == 3 then top = a + b elseif ext == 4 then top = a + b + 1 elseif ext == 5 then top = a + b - 1 end',
+    '    if top ~= nil and top > bound then bound = top end',
+    '  end',
+    '  if M ~= bound then ' + E('register bound mismatch') + ' end',
+    // every register above the parameters is written by some instruction, and each instruction writes at most 2
+    '  if M > np + n / 2 then ' + E('register bound too large') + ' end',
+    'end'
+  ].join('\n'));
+
+  // flow: the numeric table, its decoder, and the definite-assignment fixpoint
+  if (flags.flow) lines.push('local {{FL}} = ' + vmFlowTableLua(ids));
+  if (flags.flow) lines.push([
+    'local function {{ST}}(op, a, b, c)',
+    '  local f = {{FL}}[op]',
+    '  local rd, wf, wj = {}, {}, {}',
+    '  local m = f[1]',
+    '  if m % 2 == 1 then rd[#rd + 1] = a end',
+    '  if m % 4 >= 2 then rd[#rd + 1] = b end',
+    '  if m >= 4 then rd[#rd + 1] = c end',
+    '  if f[8] >= 0 then',
+    '    for r = a + f[6], a + f[7] + (f[8] == 1 and b or 0) do rd[#rd + 1] = r end',
+    '  end',
+    '  m = f[2]',
+    '  if m % 2 == 1 then wf[#wf + 1] = a end',
+    '  if m % 4 >= 2 then wf[#wf + 1] = a + 1 end',
+    '  if m >= 4 then wf[#wf + 1] = a + 3 end',
+    '  m = f[3]',
+    '  if m % 2 == 1 then wj[#wj + 1] = a end',
+    '  if m % 4 >= 2 then wj[#wj + 1] = a + 1 end',
+    '  if m >= 4 then wj[#wj + 1] = a + 3 end',
+    '  local tj = nil',
+    '  if f[4] == 1 then tj = a elseif f[4] == 2 then tj = b elseif f[4] == 3 then tj = c end',
+    '  return rd, wf, wj, tj, f[5] == 1',
+    'end'
+  ].join('\n'));
+
+  if (flags.flow) lines.push([
+    'local function {{FN}}(C, n, np)',
+    '  local IN, stk, sp = {}, {}, 0',
+    '  local e = {}',
+    '  for r = 1, np do e[r] = true end',
+    '  IN[1] = e',
+    '  sp = 1; stk[1] = 1',
+    '  local function prop(t, out)',
+    '    if t > n then ' + E('control falls off the end') + ' end',
+    '    local cur = IN[t]',
+    '    if cur == nil then',
+    '      IN[t] = out; sp = sp + 1; stk[sp] = t',
+    '    else',
+    '      local ch = false',
+    '      for r in @P@(cur) do',
+    '        if not out[r] then cur[r] = nil; ch = true end',
+    '      end',
+    '      if ch then sp = sp + 1; stk[sp] = t end',
+    '    end',
+    '  end',
+    '  while sp > 0 do',
+    '    local p = stk[sp]; stk[sp] = nil; sp = sp - 1',
+    '    local st = IN[p]',
+    '    local rd, wf, wj, tj, ft = {{ST}}(@A@(C, p), @A@(C, p + 1), @A@(C, p + 2), @A@(C, p + 3))',
+    '    if ft then',
+    '      local out = {}',
+    '      for r in @P@(st) do out[r] = true end',
+    '      for i = 1, #wf do out[wf[i]] = true end',
+    '      prop(p + 4, out)',
+    '    end',
+    '    if tj ~= nil then',
+    '      local out = {}',
+    '      for r in @P@(st) do out[r] = true end',
+    '      for i = 1, #wj do out[wj[i]] = true end',
+    '      prop(tj, out)',
+    '    end',
+    '  end',
+    '  for p = 1, n, 4 do',
+    '    local st = IN[p]',
+    '    if st ~= nil then',
+    '      local rd = {{ST}}(@A@(C, p), @A@(C, p + 1), @A@(C, p + 2), @A@(C, p + 3))',
+    '      for i = 1, #rd do',
+    '        if not st[rd[i]] then ' + E('register read before write') + ' end',
+    '      end',
+    '    end',
+    '  end',
+    'end'
+  ].join('\n'));
+
+  // entry: record checks, then structure and flow when enabled. cp = true returns private copies (snapshot mode).
+  var checks = [];
+  checks.push('local function {{NN}}(D, cp)');
+  checks.push('  if @T@(D) ~= "table" then ' + E('malformed record') + ' end');
+  checks.push('  local C, K, dg, M, np = @A@(D, 1), @A@(D, 2), @A@(D, 3), @A@(D, 4), @A@(D, 5)');
+  checks.push('  if @T@(C) ~= "table" or @T@(K) ~= "table" then ' + E('malformed record') + ' end');
+  checks.push('  if @G@(D) ~= nil or @G@(C) ~= nil or @G@(K) ~= nil then ' + E('record has a metatable') + ' end');
+  checks.push('  if @T@(M) ~= "number" or @T@(np) ~= "number" then ' + E('malformed register bound') + ' end');
+  checks.push('  if np < 0 or np ~= @M@(np) or M < 1 or M ~= @M@(M) then ' + E('malformed register bound') + ' end');
+  checks.push('  local n, nk = @L@(C), @L@(K)');
+  checks.push('  if @L@(D) ~= 5 then ' + E('malformed record') + ' end');
+  checks.push('  local kd = 0 for _ in @P@(D) do kd = kd + 1 end if kd ~= 5 then ' + E('malformed record') + ' end');
+  checks.push('  local kc, kk = 0, 0 for _ in @P@(C) do kc = kc + 1 end for _ in @P@(K) do kk = kk + 1 end if kc ~= n or kk ~= nk then ' + E('malformed record') + ' end');
+  checks.push('  if cp then');
+  checks.push('    local c2, k2 = {}, {}');
+  checks.push('    for i = 1, n do c2[i] = @A@(C, i) end');
+  checks.push('    for i = 1, nk do k2[i] = @A@(K, i) end');
+  checks.push('    C, K = c2, k2');
+  checks.push('  end');
+  checks.push('  if {{VN}}(C, K, M, np, n, nk) ~= dg then ' + E('integrity check failed') + ' end');
+  if (flags.validate) checks.push('  {{QN}}(C, K, n, M, np)');
+  if (flags.flow) checks.push('  {{FN}}(C, n, np)');
+  checks.push('  return C, K');
+  checks.push('end');
+  lines.push(checks.join('\n'));
+
+  text = lines.join('\n');
+  // substitute names first, then built-in aliases
+  text = text.replace(/\{\{(\w+)\}\}/g, function (m, key) {
+    if (has(names, key)) return names[key];
+    throw new Error('unknown verifier name ' + key);
+  });
+  text = text.replace(/@([A-Z])@/g, function (m, key) {
+    if (!has(al, key)) throw new Error('unknown alias ' + key);
+    return al[key];
+  });
+  return text;
+}
+
 // Applies the VM layer to a token stream. Returns the rewritten stream.
+// Marks tokens so the emitter writes them unchanged (see vmPlainVerifier).
+function markPlainTok(tok) {
+  tok.plain = true;
+  return tok;
+}
+function markPlain(toks) {
+  for (var i = 0; i < toks.length; i++) toks[i].plain = true;
+  return toks;
+}
+
+// ---------- packed VM record (r30) ----------
+// Alphabet for packed record digits: printable characters except double quote and backslash (so they need no escape).
+function packAlphabet(rnd) {
+  var pool = [], c, i, j, tmp, out = [];
+  for (c = 35; c <= 126; c++) if (c !== 92) pool.push(c);
+  for (i = pool.length - 1; i > 0; i--) { j = rnd(i + 1); tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp; }
+  for (i = 0; i < 90; i++) out.push(String.fromCharCode(pool[i]));
+  return out.join('');
+}
+// Encodes integers as digits 0..89 of the alphabet. Each integer is zigzag mapped, then written base 45 least significant
+// digit first; digits 45..89 mark a continuation, 0..44 the final digit. Returns null if any value is not a safe integer.
+// With a keystream seed (packedKeyed), digit t is stored as (d + ks) mod 90, where ks steps once per character: ks = (ks*75+74) mod 65537.
+function packInts(vals, alph, ks0) {
+  var s = [], i, v, z, r, ds, k, ks = ks0, dd;
+  for (i = 0; i < vals.length; i++) {
+    v = vals[i];
+    if (typeof v !== 'number' || v !== Math.floor(v) || Math.abs(v) > 1125899906842624) return null;
+    z = v >= 0 ? 2 * v : -2 * v - 1;
+    ds = [];
+    do { r = z % 45; z = Math.floor(z / 45); ds.push(r); } while (z > 0);
+    for (k = 0; k < ds.length; k++) {
+      dd = k < ds.length - 1 ? 45 + ds[k] : ds[k];
+      if (ks !== null) { ks = (ks * 75 + 74) % 65537; dd = (dd + ks % 90) % 90; }
+      s.push(alph.charAt(dd));
+    }
+  }
+  return s.join('');
+}
+
 function vmPass(T, rnd, idents) {
   var skips = [], all = {}, i, j, t, out = [], fns = [], r, ids = {}, perm = [], q, s2, tmp, nm, pre, n, k, vmNames = {}, used;
 
@@ -1089,6 +1647,8 @@ function vmPass(T, rnd, idents) {
 
   if (!fns.length) return { toks: T, pre: [], compiled: 0, skips: skips };
 
+  nm.dc = freshName('Vc');
+  var ALPH = packAlphabet(rnd);
   // per-build opcode permutation
   for (q = 0; q < VM_OPS.length; q++) perm.push(q + 1);
   for (q = perm.length - 1; q > 0; q--) {
@@ -1098,9 +1658,47 @@ function vmPass(T, rnd, idents) {
   for (q = 0; q < VM_OPS.length; q++) ids[VM_OPS[q]] = perm[q];
 
   // data table: VMD[n] = { {bytecode...}, {constant tokens...} }
-  pre = tokenize('local ' + nm.d + ' = {');
+  var KEYED = true;
+  var DECSRC = 'local ' + nm.dc + ' = function(s' + (KEYED ? ', ks' : '') + ')\n' +
+    '  local A = "' + ALPH + '"\n' +
+    '  local L = {}\n' +
+    '  for j = 1, 90 do L[string.byte(A, j)] = j - 1 end\n' +
+    '  local out, n, i, len = {}, 0, 1, #s\n' +
+    '  while i <= len do\n' +
+    '    local v, m = 0, 1\n' +
+    '    while true do\n' +
+    '      local d = L[string.byte(s, i)]\n' +
+    '      if d == nil then error("vm:12") end\n' +
+    (KEYED ? '      ks = (ks * 75 + 74) % 65537\n' + '      d = (d - ks % 90) % 90\n' : '') +
+    '      i = i + 1\n' +
+    '      if d < 45 then\n' +
+    '        v = v + d * m\n' +
+    '        break\n' +
+    '      end\n' +
+    '      v = v + (d - 45) * m\n' +
+    '      m = m * 45\n' +
+    '      if m > 9007199254740992 or i > len then error("vm:12") end\n' +
+    '    end\n' +
+    '    n = n + 1\n' +
+    '    if v % 2 == 0 then out[n] = v / 2 else out[n] = -(v + 1) / 2 end\n' +
+    '  end\n' +
+    '  return out\n' +
+    'end\n';
+  pre = markPlain(tokenize(DECSRC));
+  pre = pre.concat(tokenize('local ' + nm.d + ' = {'));
   for (n = 0; n < fns.length; n++) {
     var cd = fns[n], cc, cl;
+    var pvals = [], pk, ks0;
+    for (cc = 0; cc < cd.code.length; cc += 4) pvals.push(ids[cd.code[cc]], cd.code[cc + 1], cd.code[cc + 2], cd.code[cc + 3]);
+    ks0 = KEYED ? 1 + rnd(65536) : null;
+    pk = packInts(pvals, ALPH, ks0);
+    if (pk !== null) {
+      pre.push(['SYM', '{']);
+      pre = pre.concat(tokenize(nm.dc + '('));
+      pre.push(markPlainTok(tokenize('"' + pk + '"')[0]));
+      if (KEYED) pre = pre.concat(tokenize(',' + ks0));
+      pre.push(['SYM', ')'], ['SYM', ',']);
+    } else {
     pre.push(['SYM', '{'], ['SYM', '{']);
     for (cc = 0; cc < cd.code.length; cc += 4) {
       pre.push(['NUM', String(ids[cd.code[cc]])], ['SYM', ',']);
@@ -1109,15 +1707,16 @@ function vmPass(T, rnd, idents) {
       pre.push(['NUM', String(cd.code[cc + 3])], ['SYM', ',']);
     }
     pre.push(['SYM', '}'], ['SYM', ',']);
+    }
     pre.push(['SYM', '{']);
     for (cl = 0; cl < cd.consts.length; cl++) pre.push(cd.consts[cl], ['SYM', ',']);
-    pre.push(['SYM', '}'], ['SYM', ','], ['NUM', String(vmChecksum(cd.code, ids))], ['SYM', ','], ['SYM', '}'], ['SYM', ',']);
+    pre.push(['SYM', '}'], ['SYM', ','], ['NUM', String(vmChecksum(cd.code, ids, cd.consts, vmRegBound(cd.code, cd.np), cd.np))], ['SYM', ','], ['NUM', String(vmRegBound(cd.code, cd.np))], ['SYM', ','], ['NUM', String(cd.np)], ['SYM', ','], ['SYM', '}'], ['SYM', ',']);
   }
   pre.push(['SYM', '}']);
   pre = pre.concat(tokenize('local ' + nm.env + ' = (getgenv and getgenv()) or _G'));
   pre = pre.concat(tokenize('local ' + nm.k + ' = function(...) return {n = select("#", ...), ...} end'));
   pre = pre.concat(tokenize('local ' + nm.v + ' = function(np, ...) return {n = math.max(select("#", ...) - np, 0), select(np + 1, ...)} end'));
-  pre = pre.concat(tokenize(vmInterp(ids, nm)));
+  pre = pre.concat(markPlain(tokenize(vmInterp(ids, nm))));
   return { toks: out, pre: pre, compiled: fns.length, skips: skips };
 }
 
@@ -1639,7 +2238,8 @@ function obfuscate(src, seed, opts) {
       if (k === 'KW' && (t === 'local' || t === 'function' || t === 'if' || t === 'while' ||
           t === 'for' || t === 'repeat' || t === 'do')) { parseStmt(); continue; }
       tok = nxt();
-      if (k === 'STR' || k === 'LSTR') emitStrTok(tok);
+      if (tok.plain && (k === 'STR' || k === 'LSTR' || k === 'NUM')) { emit(t); track(t); }
+      else if (k === 'STR' || k === 'LSTR') emitStrTok(tok);
       else if (k === 'NUM') emitNum(t);
       else if (k === 'ID') emitId(t);
       else { emit(t); track(t); }
@@ -1654,7 +2254,8 @@ function obfuscate(src, seed, opts) {
       if (k === 'KW' && t === stop) return;
       if (k === 'KW' && t === 'function') { parseFunction(); continue; }
       tok = nxt();
-      if (k === 'STR' || k === 'LSTR') emitStrTok(tok);
+      if (tok.plain && (k === 'STR' || k === 'LSTR' || k === 'NUM')) { emit(t); track(t); }
+      else if (k === 'STR' || k === 'LSTR') emitStrTok(tok);
       else if (k === 'NUM') emitNum(t);
       else if (k === 'ID') emitId(t);
       else { emit(t); track(t); }
@@ -1945,12 +2546,52 @@ function obfuscate(src, seed, opts) {
     return stmts;
   }
 
+  // Largest number of states emitted as a single elseif chain. Fixture outputs use at most 5 states. Luau fails near 975 elseif branches, so 256 leaves a wide margin.
+  var CFF_CHAIN_MAX = 256;
+  // Emits the states lo..hi as a binary if-tree on the dispatch variable. Each leaf is one state. The caller
+  // closes the outer "if sv < n then ... else break end".
+  function applyCffTree(out, sv, stmts, lo, hi) {
+    var mid, j;
+    if (lo === hi) {
+      out.push('if', sv, '==', String(lo), 'then', 'do');
+      for (j = 0; j < stmts[lo].length; j++) out.push(stmts[lo][j]);
+      out.push('end', ';', sv, '=', String(lo + 1), ';', 'end');
+      return;
+    }
+    mid = lo + ((hi - lo + 1) >> 1);
+    out.push('if', sv, '<', String(mid), 'then');
+    applyCffTree(out, sv, stmts, lo, mid - 1);
+    out.push('else');
+    applyCffTree(out, sv, stmts, mid, hi);
+    out.push('end');
+  }
+
+  // Upper bound on active locals of the flattened function (see cffBudget).
+  function cffActiveLocals(tokens, hs, he, hoisted, stmts) {
+    var params = 0, best = 0, s, k, q, m, t;
+    for (k = hs; k < he; k++) if (isIdentTok(tokens[k])) params++;
+    for (s = 0; s < stmts.length; s++) {
+      m = 0;
+      for (k = 0; k < stmts[s].length; k++) {
+        t = stmts[s][k];
+        if (t !== 'local' && t !== 'for') continue;
+        if (stmts[s][k + 1] === 'function') { m++; continue; }
+        for (q = k + 1; q < stmts[s].length && (isIdentTok(stmts[s][q]) || stmts[s][q] === ','); q++) {
+          if (isIdentTok(stmts[s][q])) m++;
+        }
+      }
+      if (m > best) best = m;
+    }
+    return params + hoisted + 1 + best;
+  }
+
   function applyCFF(tokens) {
-    var out = [], i = 0, n = tokens.length, paren, bodyStart, bodyEnd, inner, stmts, k, j, sv, tk, h;
+    var out = [], i = 0, n = tokens.length, paren, bodyStart, bodyEnd, inner, stmts, k, j, sv, tk, h, hdrStart;
     while (i < n) {
       if (tokens[i] !== 'function') { out.push(tokens[i]); i++; continue; }
       out.push('function'); i++;
       paren = 0;
+      hdrStart = i;
       while (i < n) {
         tk = tokens[i];
         out.push(tk); i++;
@@ -1966,6 +2607,9 @@ function obfuscate(src, seed, opts) {
       if (!h) continue;
       stmts = splitBody(h.toks);
       if (stmts.length < 5) continue;
+      // Luau allows 200 active locals per function. The flattened form keeps every hoisted name, the dispatch
+      // variable and the most locals one state declares all active at once, plus the parameters.
+      if (cffActiveLocals(tokens, hdrStart, bodyStart, h.names.length, stmts) > 200) continue;
 
       if (h.names.length) {
         out.push('local');
@@ -1975,11 +2619,17 @@ function obfuscate(src, seed, opts) {
       }
       sv = inm('V');
       out.push('local', sv, '=', '0', ';', 'while', 'true', 'do');
-      for (k = 0; k < stmts.length; k++) {
-        // do...end makes a trailing 'return' legal inside a state.
-        out.push(k === 0 ? 'if' : 'elseif', sv, '==', String(k), 'then', 'do');
-        for (j = 0; j < stmts[k].length; j++) out.push(stmts[k][j]);
-        out.push('end', ';', sv, '=', String(k + 1), ';');
+      if (stmts.length <= CFF_CHAIN_MAX) {
+        for (k = 0; k < stmts.length; k++) {
+          // do...end makes a trailing 'return' legal inside a state.
+          out.push(k === 0 ? 'if' : 'elseif', sv, '==', String(k), 'then', 'do');
+          for (j = 0; j < stmts[k].length; j++) out.push(stmts[k][j]);
+          out.push('end', ';', sv, '=', String(k + 1), ';');
+        }
+      } else {
+        // Balanced dispatch: nesting depth is log2(states), so long bodies never reach Luau's parser depth limit.
+        out.push('if', sv, '<', String(stmts.length), 'then');
+        applyCffTree(out, sv, stmts, 0, stmts.length - 1);
       }
       out.push('else', 'break', 'end', 'end');
       stats.cff_fns++;

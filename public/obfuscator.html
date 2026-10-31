@@ -1008,6 +1008,11 @@
     saveSettings();
   });
 
+  // Output size rule (same policy as live.js): the 1 MiB limit applies to the exact text shown here,
+  // which is what Copy and Download use. The engine output alone is delivered (no harness prelude).
+  var OUTPUT_LIMIT_BYTES = 1048576;
+  var utf8Bytes = function (s) { return new TextEncoder().encode(s).length; };
+
   document.getElementById('go').addEventListener('click', function () {
     var goBtn = this;
     var errBox = document.getElementById('err');
@@ -1042,6 +1047,13 @@
           singleLine: document.getElementById('optSingleLine').checked,
         }));
         dst.value = res.code;
+        // Check the text that will actually be shown and copied (after the assignment), in UTF-8 bytes.
+        var shownBytes = utf8Bytes(dst.value);
+        if (shownBytes > OUTPUT_LIMIT_BYTES) {
+          dst.value = '';            // never leave an oversized result on screen
+          updateCounts();
+          throw new Error('output exceeds the 1 MiB limit: ' + shownBytes + ' bytes, limit ' + OUTPUT_LIMIT_BYTES + ' bytes (rejected, not shown)');
+        }
         updateCounts();
         dst.classList.add('revealing');
         renderStats(res.stats, srcVal.length, res.code.length);
